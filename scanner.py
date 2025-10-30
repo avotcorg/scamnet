@@ -21,7 +21,7 @@ except:
 INPUT_RANGE = config.get("range", "157.254.32.0-157.254.52.255")
 PORTS = config.get("ports", list(range(1080, 65536)))
 TIMEOUT = config.get("timeout", 6.0)
-MAX_WORKERS = config.get("workers", 300)
+MAX_WORKERS = config.get("workers", 3000)
 
 # ==================== 全局 ====================
 file_lock = threading.Lock()
