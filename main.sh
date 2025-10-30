@@ -91,7 +91,7 @@ cat > config.yaml << 'CONFIG'
 range: "\${START_IP}-\${END_IP}"
 ports: $PORTS_CONFIG
 timeout: 6.0
-workers: 3000
+workers: 1000
 batch_size: 10000
 CONFIG
 
