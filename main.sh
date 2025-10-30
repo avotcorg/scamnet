@@ -1,12 +1,12 @@
 #!/bin/bash
-# main.sh - Scamnet OTC SOCKS5 扫描器（v3.2 - 自定义端口 + 自动后台）
+# main.sh - Scamnet OTC SOCKS5 扫描器（v3.3 - 变量替换 + 自定义端口 + 自动后台）
 set -e
 
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; NC='\033[0m'
 LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 
-echo -e "${GREEN}[OTC] Scamnet v3.2 (自定义端口 + 自动后台)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v3.3 (自定义端口 + 自动后台 + 变量修复)${NC}"
 echo "日志 → $LATEST_LOG"
 
 # ==================== 依赖安装 ====================
@@ -17,7 +17,7 @@ if [ ! -f ".deps_installed" ]; then
         if command -v yum >/dev/null; then yum install -y python3-pip; fi
         if command -v apk >/dev/null; then apk add py3-pip; fi
     fi
-    pip3 install --user -i https://pypi.tuna.tsinghua.edu.cn/simple requests tqdm PyYAML ipaddress
+    pip3 install --user -i https://pypi.tuna.tsinghua.edu.cn/simple requests tqdm Pyshall ipaddress
     touch .deps_installed
     echo -e "${GREEN}[+] 依赖安装完成${NC}"
 else
@@ -61,20 +61,17 @@ PORT_INPUT=${PORT_INPUT:-1080}
 # 解析端口
 PORTS_CONFIG=""
 if [[ $PORT_INPUT =~ ^[0-9]+-[0-9]+$ ]]; then
-    # 范围格式：1-65535
     PORTS_CONFIG="!range $PORT_INPUT"
 elif [[ $PORT_INPUT =~ ^[0-9]+( [0-9]+)*$ ]]; then
-    # 多端口：1080 8080 2000
-    PORT_LIST=$(echo "$PORT_INPUT" | tr ' ' ',')
-    PORTS_CONFIG="[$PORT_LIST]"
+    PORT_LIST=$(echo "$PORT_INPUT" | tr ' ' ',' | sed 's/,/","/g')
+    PORTS_CONFIG='["'"$PORT_LIST"'"]'
 else
-    # 单端口
     PORTS_CONFIG="[$PORT_INPUT]"
 fi
 
 echo -e "${GREEN}[*] 端口配置: $PORT_INPUT → $PORTS_CONFIG${NC}"
 
-# ==================== 生成后台运行脚本 ====================
+# ==================== 生成后台运行脚本（关键：双引号 + \$ 转义）================
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
 
 cat > "$RUN_SCRIPT" << EOF
@@ -84,18 +81,17 @@ set -e
 # 传递变量
 START_IP="$START_IP"
 END_IP="$END_IP"
-PORTS_CONFIG='$PORTS_CONFIG'
 
-# 创建 config.yaml
-cat > config.yaml << 'CONFIG'
+# 创建 config.yaml（双引号，允许变量替换）
+cat > config.yaml << CONFIG
 range: "\${START_IP}-\${END_IP}"
 ports: $PORTS_CONFIG
 timeout: 6.0
-workers: 1000
+workers: 500
 batch_size: 10000
 CONFIG
 
-# scanner.py
+# scanner.py（修复转义 + 安全进度）
 cat > scanner.py << 'PY'
 import sys, os; sys.path.append(os.path.dirname(__file__))
 import yaml
@@ -239,7 +235,7 @@ def main():
 if __name__ == '__main__': main()
 PY
 
-# 插件（保持不变）
+# 插件
 mkdir -p plugins
 cat > plugins/__init__.py << 'PY'
 import importlib, os
