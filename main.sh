@@ -255,10 +255,12 @@ PY
 
 cat > plugins/auth_weak.py << 'PY'
 WEAK_PASSWORDS = [
-    "123:123","admin:admin","root:root","proxy:proxy","user:user",
-    "111:111","1:1","qwe123:qwe123","abc:abc","aaa:aaa",
-    "1234:1234","socks5:socks5","123456:123456","admin123:admin",
-    "12345:12345","test:test","guest:guest","888888:888888"
+        "123:123", "111:111", "1:1", "qwe123:qwe123", "abc:abc", "aaa:aaa",
+    "1234:1234", "admin:admin", "socks5:socks5", "123456:123456",
+    "12345678:12345678", "admin123:admin", "proxy:proxy", "admin:123456", "root:root",
+    "12345:12345", "test:test", "user:user", "guest:guest", "admin:", "888888:888888", 
+  "test123:test123", "qwe:qwe", "qwer:qwer", "qwer:qwer", "11:11", "222:222", "2:2", "3:3",
+  "12349:12349", "12349:12349", "user:123", "user:1234", "user:12345", "user:123456"
 ]
 def brute(ip, port):
     from scanner import is_socks5_available, TIMEOUT
