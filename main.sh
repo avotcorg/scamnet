@@ -1,6 +1,6 @@
 #!/bin/bash
 # main.sh - Scamnet OTC SOCKS5 扫描器（完整自包含版）
-# 端口已改为默认 1-65535 全端口扫描（已修复 !range 解析）
+# 端口已改为默认 1-65535 全端口扫描（已修复 !range 解析 + 真实进度）
 # TG: @soqunla | GitHub: https://github.com/avotcorg/scamnet
 
 set -e
@@ -11,7 +11,7 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/scanner_$(date +%Y%m%d_%H%M%S).log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG"; }
 
-echo -e "${GREEN}[OTC] Scamnet 完整启动器 v2.2 (全端口 1-65535 - 修复 !range)${NC}"
+echo -e "${GREEN}[OTC] Scamnet 完整启动器 v2.3 (真实扫描进度修复)${NC}"
 echo "日志 → $LOG"
 
 # ==================== 内嵌 requirements.txt ====================
@@ -27,38 +27,26 @@ if [ ! -f ".deps_installed" ]; then
     echo -e "${YELLOW}[*] 安装依赖（清华源）...${NC}"
     echo "$REQUIREMENTS_CONTENT" > /tmp/scamnet_reqs.txt
     if ! command -v pip3 &>/dev/null; then
-        echo -e "${RED}[!] pip3 未安装，尝试自动安装...${NC}"
-        if command -v apt >/dev/null; then
-            apt update -qq && apt install -y python3-pip >>"$LOG" 2>&1
-        elif command -v yum >/dev/null; then
-            yum install -y python3-pip >>"$LOG" 2>&1
-        elif command -v apk >/dev/null; then
-            apk add py3-pip >>"$LOG" 2>&1
-        else
-            echo -e "${RED}[!] 不支持的系统，无法自动安装 pip3${NC}"
-            exit 1
-        fi
-    fi
-    pip3 install --user -i https://pypi.tuna.tsinghua.edu.cn/simple \
-        -r /tmp/scamnet_reqs.txt --no-warn-script-location 2>&1 | tee -a "$LOG"
-    rm -f /tmp/scamnet_reqs.txt
-    touch .deps_installed
-    log "依赖安装完成"
-else
-    log "依赖已安装"
-fi
-
-# ==================== 下载/创建文件函数 ====================
-download_or_create() {
-    local url="$1" file="$2" content="$3"
-    if curl -Ls --fail --retry 3 -o "$file" "$url" 2>/dev/null; then
-        log "下载成功: $file"
+    echo -e "${RED}[!] pip3 未安装，尝试自动安装...${NC}"
+    if command -v apt >/dev/null; then
+        apt update -qq && apt install -y python3-pip >>"$LOG" 2>&1
+    elif command -v yum >/dev/null; then
+        yum install -y python3-pip >>"$LOG" 2>&1
+    elif command -v apk >/dev/null; then
+        apk add py3-pip >>"$LOG" 2>&1
     else
-        echo -e "${YELLOW}[*] 下载失败，创建内嵌版: $file${NC}"
-        echo "$content" > "$file"
-        log "创建内嵌: $file"
+        echo -e "${RED}[!] 不支持的系统，无法自动安装 pip3${NC}"
+        exit 1
     fi
-}
+fi
+pip3 install --user -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    -r /tmp/scamnet_reqs.txt --no-warn-script-location 2>&1 | tee -a "$LOG"
+rm -f /tmp/scamnet_reqs.txt
+touch .deps_installed
+log "依赖安装完成"
+else
+log "依赖已安装"
+fi
 
 # ==================== 创建 config.yaml（全端口 1-65535）================
 cat > config.yaml << 'EOF'
@@ -70,22 +58,21 @@ workers: 300
 EOF
 log "config.yaml 已创建（全端口 1-65535）"
 
-# ==================== scanner.py（关键修复：支持 !range）================
+# ==================== scanner.py（关键修复：真实等待任务完成）================
 cat > scanner.py << 'PY'
 import sys, os; sys.path.append(os.path.dirname(__file__))
 import yaml
 from yaml import SafeLoader
 from plugins import load_plugins
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import socket, ipaddress, threading, time
 from tqdm import tqdm
 
-# ==================== 关键修复：注册 !range 构造器 ====================
+# ==================== 注册 !range 构造器 ====================
 def range_constructor(loader, node):
     value = loader.construct_scalar(node)
     start, end = map(int, value.split('-'))
     return list(range(start, end + 1))
-
 yaml.add_constructor('!range', range_constructor, Loader=SafeLoader)
 
 # ==================== 加载配置 ====================
@@ -113,7 +100,6 @@ plugins = load_plugins()
 
 # ==================== 核心函数 ====================
 def test_proxy(ip: str, port: int):
-    global valid_count
     result = {'ip':ip, 'port':port, 'status':'FAIL', 'country':'XX', 'latency':'-', 'export_ip':'-', 'auth':''}
     ok, latency, export_ip = is_socks5_available(ip, port, None, None)
     if ok:
@@ -131,7 +117,9 @@ def test_proxy(ip: str, port: int):
                     result.update({'status':'OK (Weak)', 'country':country, 'latency':f'{latency}ms', 'export_ip':export_ip, 'auth':f'{user}:{pwd}'})
     plugins['output_file'].save_detail(result)
     if result['status'].startswith('OK'):
-        valid_count += 1
+        with file_lock:
+            global valid_count
+            valid_count += 1
         plugins['output_file'].save_valid(result)
 
 def get_country(ip):
@@ -172,7 +160,7 @@ def is_socks5_available(ip, port, user=None, pwd=None):
             return True, round((time.time()-start)*1000), export_ip
     except: return False,0,None
 
-# ==================== 主函数 ====================
+# ==================== 主函数（关键修复）===================
 def main():
     print('[OTC] 扫描启动')
     start_ip = int(ipaddress.IPv4Address(INPUT_RANGE.split('-')[0]))
@@ -180,18 +168,19 @@ def main():
     ips = [str(ipaddress.IPv4Address(i)) for i in range(start_ip, end_ip + 1)]
     total = len(ips) * len(PORTS)
     print(f'IP: {len(ips):,}, 端口: {len(PORTS):,}, 总任务: {total:,}')
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
-        pbar = tqdm(total=total, desc='扫描', unit='port', ncols=100)
-        for ip in ips:
-            for port in PORTS:
-                exe.submit(test_proxy, ip, port)
-                pbar.update(1)
-        pbar.close()
+        # 提交所有任务
+        futures = [exe.submit(test_proxy, ip, port) for ip in ips for port in PORTS]
+        # 真实等待 + 真实进度
+        for future in tqdm(as_completed(futures), total=total, desc='扫描', unit='port', ncols=100):
+            future.result()  # 确保任务完成
+
     print(f'\n[+] 完成！发现 {valid_count} 个可用代理')
 
 if __name__ == '__main__': main()
 PY
-log "scanner.py 已写入（支持 !range）"
+log "scanner.py 已写入（真实进度修复）"
 
 # ==================== 创建 plugins 目录 & 插件（保持不变）===================
 mkdir -p plugins
