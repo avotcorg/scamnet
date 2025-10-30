@@ -1,15 +1,15 @@
 #!/bin/bash
-# main.sh - Scamnet OTC SOCKS5 全端口扫描器（v3.0 - 自动后台 + 防中断）
+# main.sh - Scamnet OTC SOCKS5 扫描器（v3.2 - 自定义端口 + 自动后台）
 set -e
 
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; NC='\033[0m'
 LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 
-echo -e "${GREEN}[OTC] Scamnet v3.0 (全端口 1-65535 - 自动后台运行)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v3.2 (自定义端口 + 自动后台)${NC}"
 echo "日志 → $LATEST_LOG"
 
-# ==================== 依赖 ====================
+# ==================== 依赖安装 ====================
 if [ ! -f ".deps_installed" ]; then
     echo -e "${YELLOW}[*] 安装依赖...${NC}"
     if ! command -v pip3 &>/dev/null; then
@@ -49,24 +49,54 @@ fi
 
 echo -e "${GREEN}[*] 扫描范围: $START_IP - $END_IP${NC}"
 
-# ==================== 生成实际运行脚本 ====================
+# ==================== 输入自定义端口 ====================
+echo -e "${YELLOW}请输入端口（默认: 1080）:${NC}"
+echo "   支持格式："
+echo "     1080"
+echo "     1080 8080 2000"
+echo "     1-65535"
+read -r PORT_INPUT
+PORT_INPUT=${PORT_INPUT:-1080}
+
+# 解析端口
+PORTS_CONFIG=""
+if [[ $PORT_INPUT =~ ^[0-9]+-[0-9]+$ ]]; then
+    # 范围格式：1-65535
+    PORTS_CONFIG="!range $PORT_INPUT"
+elif [[ $PORT_INPUT =~ ^[0-9]+( [0-9]+)*$ ]]; then
+    # 多端口：1080 8080 2000
+    PORT_LIST=$(echo "$PORT_INPUT" | tr ' ' ',')
+    PORTS_CONFIG="[$PORT_LIST]"
+else
+    # 单端口
+    PORTS_CONFIG="[$PORT_INPUT]"
+fi
+
+echo -e "${GREEN}[*] 端口配置: $PORT_INPUT → $PORTS_CONFIG${NC}"
+
+# ==================== 生成后台运行脚本 ====================
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
 
 cat > "$RUN_SCRIPT" << EOF
 #!/bin/bash
 set -e
 
-# 重新创建 config.yaml
-cat > config.yaml << 'PY'
-range: "$START_IP-$END_IP"
-ports: !range 1-65535
+# 传递变量
+START_IP="$START_IP"
+END_IP="$END_IP"
+PORTS_CONFIG='$PORTS_CONFIG'
+
+# 创建 config.yaml
+cat > config.yaml << 'CONFIG'
+range: "\${START_IP}-\${END_IP}"
+ports: $PORTS_CONFIG
 timeout: 6.0
 workers: 3000
 batch_size: 10000
-PY
+CONFIG
 
-# scanner.py（分批 + 防崩溃）
-cat > scanner.py << "PY"
+# scanner.py
+cat > scanner.py << 'PY'
 import sys, os; sys.path.append(os.path.dirname(__file__))
 import yaml
 from yaml import SafeLoader
@@ -87,7 +117,7 @@ with open('config.yaml') as f:
 INPUT_RANGE = cfg['range']
 RAW_PORTS = cfg['ports']
 TIMEOUT = cfg.get('timeout', 6.0)
-MAX_WORKERS = cfg.get('workers', 300)
+MAX_WORKERS = cfg.get('workers', 500)
 BATCH_SIZE = cfg.get('batch_size', 10000)
 
 if isinstance(RAW_PORTS, list):
@@ -96,13 +126,18 @@ else:
     print("[!] 端口解析失败，使用默认 [1080]")
     PORTS = [1080]
 
-print(f"[DEBUG] 端口数量: {len(PORTS)} (期望: 65535)")
+print(f"[DEBUG] 端口数量: {len(PORTS)}")
 
 file_lock = threading.Lock()
 valid_count = 0
+progress_lock = threading.Lock()
 plugins = load_plugins()
 
-def test_proxy(ip, port):
+def safe_update(pbar):
+    with progress_lock:
+        pbar.update(1)
+
+def test_proxy(ip, port, pbar):
     try:
         result = {'ip':ip, 'port':port, 'status':'FAIL', 'country':'XX', 'latency':'-', 'export_ip':'-', 'auth':''}
         ok, lat, exp = is_socks5_available(ip, port, None, None)
@@ -127,6 +162,8 @@ def test_proxy(ip, port):
             plugins['output_file'].save_valid(result)
     except Exception:
         pass
+    finally:
+        safe_update(pbar)
 
 def get_country(ip):
     try:
@@ -140,22 +177,22 @@ def is_socks5_available(ip, port, u=None, p=None):
     try:
         with socket.create_connection((ip, port), timeout=TIMEOUT) as s:
             s.settimeout(TIMEOUT)
-            m = b'\\x05\\x02\\x00\\x02' if u and p else b'\\x05\\x01\\x00'
+            m = b'\x05\x02\x00\x02' if u and p else b'\x05\x01\x00'
             s.sendall(m)
             r = s.recv(2)
             if len(r) != 2 or r[0] != 5: return False, 0, None
             if r[1] == 0: pass
             elif r[1] == 2 and u and p:
-                a = b'\\x01' + bytes([len(u)]) + u.encode() + bytes([len(p)]) + p.encode()
+                a = b'\x01' + bytes([len(u)]) + u.encode() + bytes([len(p)]) + p.encode()
                 s.sendall(a)
                 resp = s.recv(2)
                 if len(resp) < 2 or resp[1] != 0: return False, 0, None
             else: return False, 0, None
-            t = socket.inet_aton(socket.gethostbyname('ifconfig.me')) + b'\\x00\\x50'
-            s.sendall(b'\\x05\\x01\\x00\\x01' + t)
+            t = socket.inet_aton(socket.gethostbyname('ifconfig.me')) + b'\x00\x50'
+            s.sendall(b'\x05\x01\x00\x01' + t)
             resp = s.recv(10)
             if len(resp) < 2 or resp[1] != 0: return False, 0, None
-            s.sendall(b'GET / HTTP/1.1\\r\\nHost: ifconfig.me\\r\\n\\r\\n')
+            s.sendall(b'GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n')
             resp = b''
             st = time.time()
             while time.time() - st < TIMEOUT:
@@ -163,9 +200,9 @@ def is_socks5_available(ip, port, u=None, p=None):
                     c = s.recv(1024)
                     if not c: break
                     resp += c
-                    if b'\\r\\n\\r\\n' in resp: break
+                    if b'\r\n\r\n' in resp: break
                 except: break
-            export_ip = resp.split(b'\\r\\n\\r\\n', 1)[1].decode(errors='ignore').split()[0] if b'\\r\\n\\r\\n' in resp else 'Unknown'
+            export_ip = resp.split(b'\r\n\r\n', 1)[1].decode(errors='ignore').split()[0] if b'\r\n\r\n' in resp else 'Unknown'
             return True, round((time.time() - st) * 1000), export_ip
     except: return False, 0, None
 
@@ -184,29 +221,27 @@ def main():
         count = 0
         for ip in ips:
             for port in PORTS:
-                futures.append(exe.submit(test_proxy, ip, port))
+                futures.append(exe.submit(test_proxy, ip, port, pbar))
                 count += 1
                 if count >= BATCH_SIZE:
                     for f in as_completed(futures):
                         try: f.result()
                         except: pass
-                        pbar.update(1)
                     futures.clear()
                     count = 0
         for f in as_completed(futures):
             try: f.result()
             except: pass
-            pbar.update(1)
 
     pbar.close()
-    print(f'\\n[+] 完成！发现 {valid_count} 个可用代理')
+    print(f'\n[+] 完成！发现 {valid_count} 个可用代理')
 
 if __name__ == '__main__': main()
 PY
 
-# 插件
+# 插件（保持不变）
 mkdir -p plugins
-cat > plugins/__init__.py << "PY"
+cat > plugins/__init__.py << 'PY'
 import importlib, os
 def load_plugins():
     p = {}
@@ -218,14 +253,12 @@ def load_plugins():
     return p
 PY
 
-cat > plugins/auth_weak.py << "PY"
+cat > plugins/auth_weak.py << 'PY'
 WEAK_PASSWORDS = [
-        "123:123", "111:111", "1:1", "qwe123:qwe123", "abc:abc", "aaa:aaa",
-    "1234:1234", "admin:admin", "socks5:socks5", "123456:123456",
-    "12345678:12345678", "admin123:admin", "proxy:proxy", "admin:123456", "root:root",
-    "12345:12345", "test:test", "user:user", "guest:guest", "admin:", "888888:888888", 
-  "test123:test123", "qwe:qwe", "qwer:qwer", "qwer:qwer", "11:11", "222:222", "2:2", "3:3",
-  "12349:12349", "12349:12349", "user:123", "user:1234", "user:12345", "user:123456"
+    "123:123","admin:admin","root:root","proxy:proxy","user:user",
+    "111:111","1:1","qwe123:qwe123","abc:abc","aaa:aaa",
+    "1234:1234","socks5:socks5","123456:123456","admin123:admin",
+    "12345:12345","test:test","guest:guest","888888:888888"
 ]
 def brute(ip, port):
     from scanner import is_socks5_available, TIMEOUT
@@ -236,7 +269,7 @@ def brute(ip, port):
     return None
 PY
 
-cat > plugins/geo_ipapi.py << "PY"
+cat > plugins/geo_ipapi.py << 'PY'
 import requests
 def get(ip):
     try:
@@ -248,7 +281,7 @@ def get(ip):
     return None
 PY
 
-cat > plugins/output_file.py << "PY"
+cat > plugins/output_file.py << 'PY'
 import threading
 file_lock = threading.Lock()
 valid_count = 0
@@ -256,7 +289,7 @@ def save_detail(r):
     line = f'{r["ip"]}:{r["port"]} | {r["status"]} | {r["country"]} | {r["latency"]} | {r["export_ip"]} | {r["auth"]}'
     with file_lock:
         with open('result_detail.txt', 'a', encoding='utf-8') as f:
-            f.write(line + '\\n')
+            f.write(line + '\n')
 def save_valid(r):
     global valid_count
     valid_count += 1
@@ -264,7 +297,7 @@ def save_valid(r):
     fmt = f'socks5://{auth}@{r["ip"]}:{r["port"]}#{r["country"]}' if auth else f'socks5://{r["ip"]}:{r["port"]}#{r["country"]}'
     with file_lock:
         with open('socks5_valid.txt', 'a', encoding='utf-8') as f:
-            f.write(fmt + '\\n')
+            f.write(fmt + '\n')
     print(f'[+] 发现 #{valid_count}: {fmt}')
 PY
 
@@ -276,7 +309,7 @@ echo "# socks5://..." > socks5_valid.txt
 python3 scanner.py 2>&1 | tee "$LATEST_LOG"
 
 VALID=\$(grep -c "^socks5://" socks5_valid.txt || echo 0)
-echo -e "\\n${GREEN}[+] 完成！发现 \${VALID} 个代理${NC}"
+echo -e "\n${GREEN}[+] 完成！发现 \${VALID} 个代理${NC}"
 EOF
 
 chmod +x "$RUN_SCRIPT"
