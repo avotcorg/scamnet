@@ -61,7 +61,7 @@ cat > config.yaml << 'PY'
 range: "$START_IP-$END_IP"
 ports: !range 1-65535
 timeout: 6.0
-workers: 300
+workers: 3000
 batch_size: 10000
 PY
 
