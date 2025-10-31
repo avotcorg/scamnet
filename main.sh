@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v1.3（纯 Go 版 + 412 条弱口令 + 完全修复）
+# main.sh - Scamnet OTC v1.1（纯 Go 版 + 412 条弱口令 + 完全修复）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -7,7 +7,7 @@ RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0
 LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 GO_BIN="$LOG_DIR/scamnet_go"
-VALID_FILE="socks5_valid.txt"  # ← 统一文件名
+VALID_FILE="socks5_valid.txt"
 
 log() { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
 err() { echo -e "${RED}[$(date '+%H:%M:%S')] [!] $*${NC}" >&2; }
@@ -43,7 +43,7 @@ echo -e "${YELLOW}Telegram Bot Token（可选）:${NC}"; read -r TELEGRAM_TOKEN
 echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]] && succ "Telegram 启用" || { TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""; log "Telegram 禁用"; }
 
-# 编译 Go 程序
+# 编译 Go 程序（已删除 "io"）
 log "正在编译 Go 扫描器（412 条弱口令）..."
 cat > scamnet.go << 'EOF'
 package main
@@ -66,6 +66,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
 	"golang.org/x/sync/semaphore"
 )
 
@@ -83,7 +84,7 @@ type Config struct {
 
 var (
 	cfg          Config
-	validFile    = "socks5_valid.txt"  // ← 统一
+	validFile    = "socks5_valid.txt"
 	seen         = sync.Map{}
 	stats        = make(map[string]int)
 	statsMu      sync.Mutex
@@ -176,7 +177,7 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v7.3 - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v7.4 - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for i := 0; i < total; i += cfg.BatchSize {
@@ -391,7 +392,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v7.3 - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.1 - " + time.Now().Format("2025-01-01 15:04:05") + "\n")
 	for _, l := range sorted {
 		out.WriteString(l + "\n")
 	}
@@ -448,7 +449,7 @@ go get golang.org/x/sync/semaphore 2>/dev/null || true
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$GO_BIN" scamnet.go
 succ "Go 扫描器编译完成 → $GO_BIN"
 
-# 守护进程（统一使用 scamnet_guard.sh）
+# 守护进程
 GUARD_SCRIPT="$LOG_DIR/scamnet_guard.sh"
 cat > "$GUARD_SCRIPT" << EOF
 #!/bin/bash
