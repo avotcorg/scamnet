@@ -57,7 +57,7 @@ cd "\$(dirname "\$0")"
 # === 变量重新定义（完全独立）===
 START_IP="$START_IP"
 END_IP="$END_IP"
-PORTS_CONFIG='$PORTS_CONFIG'
+PORTS_CONFIG="$PORTS_CONFIG"
 # === 写入 config.yaml ===
 cat > config.yaml << CONFIG
 input_range: "\$START_IP-\$END_IP"
@@ -228,12 +228,7 @@ else:
 print(ips * ports)
   "
 )
-BATCH_SIZE=\$(
-  python3 -c "
-import yaml
-print(yaml.safe_load(open('config.yaml')).get('batch_size', 300))
-  "
-)
+BATCH_SIZE=\$(yq e '.batch_size' config.yaml 2>/dev/null || echo 300)
 echo "[*] 总任务: \$TOTAL, 分批: \$BATCH_SIZE"
 > socks5_valid.txt
 > result_detail.txt
