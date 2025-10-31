@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v4.3（终极修复：YAML 强制换行 + 安全注入）
+# main.sh - Scamnet OTC v4.4（终极修复：aiohttp 安装 + PATH 修复 + 环境检测 +支持root用户和非root用户）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -8,21 +8,42 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
 
-echo -e "${GREEN}[OTC] Scamnet v4.3 (终极修复 + 全端口安全扫描)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v4.4 (终极修复 + 环境自适应)${NC}"
 echo "日志 → $LATEST_LOG"
 
-# ==================== 依赖安装 ====================
-if [ ! -f ".deps_installed" ]; then
-    echo -e "${YELLOW}[*] 安装依赖...${NC}"
-    if ! command -v pip3 &>/dev/null; then
-        if command -v apt >/dev/null; then apt update -qq && apt install -y python3-pip; fi
-        if command -v yum >/dev/null; then yum install -y python3-pip; fi
-        if command -v apk >/dev/null; then apk add py3-pip; fi
-        if command -v pacman >/dev/null; then pacman -Sy --noconfirm python-pip; fi
+# ==================== 环境检测 & 依赖安装 ====================
+install_deps() {
+    echo -e "${YELLOW}[*] 检测 Python 环境...${NC}"
+    PYTHON_CMD=$(command -v python3 || command -v python || echo "")
+    if [ -z "$PYTHON_CMD" ]; then
+        echo -e "${RED}[!] 未找到 Python！${NC}"
+        exit 1
     fi
-    pip3 install --user -i https://pypi.tuna.tsinghua.edu.cn/simple aiohttp tqdm pyyaml
+
+    PIP_CMD="$PYTHON_CMD -m pip"
+    if ! $PIP_CMD --version &>/dev/null; then
+        echo -e "${YELLOW}[*] 安装 pip...${NC}"
+        curl -sS https://bootstrap.pypa.io/get-pip.py | $PYTHON_CMD
+    fi
+
+    echo -e "${YELLOW}[*] 安装 aiohttp tqdm pyyaml...${NC}"
+    # 优先系统级安装，失败则 fallback 到 --user
+    if $PIP_CMD install --quiet aiohttp tqdm pyyaml; then
+        echo -e "${GREEN}[+] 系统级安装成功${NC}"
+    elif $PIP_CMD install --user --quiet aiohttp tqdm pyyaml; then
+        echo -e "${GREEN}[+] 用户级安装成功${NC}"
+        # 自动添加 --user 的 bin 到 PATH
+        USER_BASE=$($PYTHON_CMD -m site --user-base)
+        export PATH="$USER_BASE/bin:$PATH"
+    else
+        echo -e "${RED}[!] 依赖安装失败！${NC}"
+        exit 1
+    fi
     touch .deps_installed
-    echo -e "${GREEN}[+] 依赖安装完成${NC}"
+}
+
+if [ ! -f ".deps_installed" ]; then
+    install_deps
 else
     echo -e "${GREEN}[+] 依赖已安装${NC}"
 fi
@@ -73,7 +94,7 @@ cat > "$RUN_SCRIPT" << 'EOF'
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# === 终极安全生成 config.yaml（强制换行）===
+# === 强制换行写入 config.yaml ===
 printf 'input_range: "%s-%s"\n' "${START_IP}" "${END_IP}" > config.yaml
 printf '%s\n' "$PORTS_CONFIG" >> config.yaml
 printf 'timeout: 5.0\n' >> config.yaml
@@ -246,7 +267,7 @@ async def scan(ip, port, session):
                 f.write(line + "\n")
 
 async def main():
-    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.3\n")
+    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.4\n")
     with open("socks5_valid.txt", "w") as f: f.write("# socks5://...\n")
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT, limit_per_host=10, ssl=False, force_close=True, enable_cleanup_closed=True)
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
@@ -265,11 +286,18 @@ PY
 chmod +x scanner_async.py
 > result_detail.txt
 > socks5_valid.txt
+
+# === 自动修复 PATH ===
+PYTHON_BIN=$(python3 -c "import site, os; print(os.path.join(site.USER_BASE, 'bin'))" 2>/dev/null || echo "")
+if [ -n "$PYTHON_BIN" ] && [ -d "$PYTHON_BIN" ]; then
+    export PATH="$PYTHON_BIN:$PATH"
+fi
+
 echo "[OTC] 扫描启动..."
 python3 scanner_async.py
 EOF
 
-# ==================== 安全注入变量 ====================
+# ==================== 注入变量 ====================
 START_IP_ESC=$(printf '%s' "$START_IP" | escape_yaml)
 END_IP_ESC=$(printf '%s' "$END_IP" | escape_yaml)
 PORTS_CONFIG_ESC=$(printf '%s' "$PORTS_CONFIG" | escape_yaml)
