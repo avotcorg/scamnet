@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v4.1（终极无敌：YAML 强制换行 + 变量安全注入 + aiohttp 强制安装）
+# main.sh - Scamnet OTC v4.1（终极无敌：不注入变量 + 直接展开 + YAML 100% 安全）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -8,10 +8,10 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
 
-echo -e "${GREEN}[OTC] Scamnet v4.1 (终极无敌 + YAML 强制换行)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v4.1 (终极无敌 + 直接展开)${NC}"
 echo "日志 → $LATEST_LOG"
 
-# ==================== 强制依赖安装（系统级）===================
+# ==================== 强制依赖安装 ====================
 install_deps_force() {
     echo -e "${YELLOW}[*] 强制安装依赖（系统级）...${NC}"
     apt update -qq && apt install -y python3 python3-pip python3-venv || yum install -y python3 python3-pip || apk add python3 py3-pip || true
@@ -71,24 +71,21 @@ else
 fi
 echo -e "${GREEN}[*] 端口配置: $PORT_INPUT → $PORTS_CONFIG${NC}"
 
-# ==================== 安全转义函数 ====================
-escape_yaml() {
-    python3 -c 'import sys, json; sys.stdout.write(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '""'
-}
-
-# ==================== 生成后台脚本 ====================
-cat > "$RUN_SCRIPT" << 'EOF'
+# ==================== 生成后台脚本（直接展开变量）===================
+cat > "$RUN_SCRIPT" << EOF
 #!/bin/bash
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "\$(dirname "\$0")"
 
-# === 终极安全写入 config.yaml（强制换行）===
-printf 'input_range: "%s-%s"\n' "$START_IP" "$END_IP" > config.yaml
-printf '%s\n' "$PORTS_CONFIG" >> config.yaml
-printf 'timeout: 5.0\n' >> config.yaml
-printf 'max_concurrent: 5000\n' >> config.yaml
+# === 直接写入 config.yaml（变量已展开）===
+cat > config.yaml << CONFIG
+input_range: "$START_IP-$END_IP"
+$PORTS_CONFIG
+timeout: 5.0
+max_concurrent: 5000
+CONFIG
 
-# === scanner_async.py ===
+# === scanner_async.py（保持不变）===
 cat > scanner_async.py << 'PY'
 #!/usr/bin/env python3
 import asyncio
@@ -255,7 +252,7 @@ async def scan(ip, port, session):
                 f.write(line + "\n")
 
 async def main():
-    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.6\n")
+    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.7\n")
     with open("socks5_valid.txt", "w") as f: f.write("# socks5://...\n")
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT, limit_per_host=10, ssl=False, force_close=True, enable_cleanup_closed=True)
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
@@ -277,17 +274,6 @@ chmod +x scanner_async.py
 echo "[OTC] 扫描启动..."
 python3 scanner_async.py
 EOF
-
-# ==================== 变量注入（使用转义后的值）===================
-START_IP_ESC=$(printf '%s' "$START_IP" | escape_yaml)
-END_IP_ESC=$(printf '%s' "$END_IP" | escape_yaml)
-PORTS_CONFIG_ESC=$(printf '%s' "$PORTS_CONFIG" | escape_yaml)
-
-sed -i \
-    -e "s|\$START_IP|$START_IP_ESC|g" \
-    -e "s|\$END_IP|$END_IP_ESC|g" \
-    -e "s|\$PORTS_CONFIG|$PORTS_CONFIG_ESC|g" \
-    "$RUN_SCRIPT"
 
 chmod +x "$RUN_SCRIPT"
 
