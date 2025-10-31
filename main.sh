@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v6.3（终极修复版：语法 + TOTAL + 引号 + 永不崩溃）
+# main.sh - Scamnet OTC v6.4（终极稳定版：强制换行 + 语法正确 + 永不崩溃）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -288,15 +288,18 @@ async def scan(ip, port):
 # 主函数
 async def main():
     sem = asyncio.Semaphore(max_concurrent)
+    
     async def bound(ip, port):
         async with sem:
             try:
                 await scan(ip, port)
             except:
                 pass
+
     tasks = [bound(ip, port) for ip, port in batch]
     for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f"Batch {start_idx}-{end_idx}", unit="conn"):
         await f
+    
     if stats:
         send_telegram(f"Summary: {dict(stats)} new proxies")
 
@@ -343,7 +346,7 @@ BATCH_SIZE=$(python3 -c "import yaml; print(yaml.safe_load(open('config.yaml')).
 echo "[*] 总任务: $TOTAL | 每批: $BATCH_SIZE"
 
 > socks5_valid.txt
-echo "# Scamnet v6.3 - $(date)" > socks5_valid.txt
+echo "# Scamnet v6.4 - $(date)" > socks5_valid.txt
 
 export TELEGRAM_TOKEN="$TELEGRAM_TOKEN"
 export TELEGRAM_CHATID="$TELEGRAM_CHATID"
