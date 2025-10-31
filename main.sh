@@ -54,7 +54,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -67,7 +66,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
 	"golang.org/x/sync/semaphore"
 )
 
