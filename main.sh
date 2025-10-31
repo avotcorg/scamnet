@@ -8,7 +8,7 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
 
-echo -e "${GREEN}[OTC] Scamnet v5.1 (终极独立版 + 永不崩溃)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v4.1 (终极独立版 + 永不崩溃)${NC}"
 echo "日志 → $LATEST_LOG"
 
 # ==================== 依赖安装 ====================
