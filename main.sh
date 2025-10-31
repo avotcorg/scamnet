@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v1.2（Go 版 + 412 条弱口令 + 编译通过）
+# main.sh - Scamnet OTC v1.3（纯 Go 版 + 412 条弱口令 + 完全修复）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -7,16 +7,19 @@ RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0
 LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 GO_BIN="$LOG_DIR/scamnet_go"
+VALID_FILE="socks5_valid.txt"  # ← 统一文件名
 
 log() { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
 err() { echo -e "${RED}[$(date '+%H:%M:%S')] [!] $*${NC}" >&2; }
 succ() { echo -e "${GREEN}[$(date '+%H:%M:%S')] [+] $*${NC}"; }
 
+# 检查 Go
 if ! command -v go >/dev/null 2>&1; then
-    err "未找到 Go，请先安装: apt install golang -y"
+    err "未找到 Go，请先安装: apt install golang-go -y"
     exit 1
 fi
 
+# 输入
 DEFAULT_START="157.254.32.0"
 DEFAULT_END="157.254.52.255"
 read_ip() { echo -e "${YELLOW}$1（默认: $2）:${NC}"; read -r input; eval "$3=\"\${input:-$2}\""; }
@@ -33,21 +36,14 @@ succ "范围: $START_IP - $END_IP"
 
 echo -e "${YELLOW}端口（默认: 1080）:${NC}"
 read -r PORT_INPUT; PORT_INPUT=${PORT_INPUT:-1080}
-
-PORTS=""
-if [[ $PORT_INPUT =~ ^[0-9]+-[0-9]+$ ]]; then
-    PORTS="$PORT_INPUT"
-elif [[ $PORT_INPUT =~ ^[0-9]+( [0-9]+)*$ ]]; then
-    PORTS=$(echo "$PORT_INPUT" | tr ' ' ',')
-else
-    PORTS="$PORT_INPUT"
-fi
+PORTS="$PORT_INPUT"
 succ "端口: $PORT_INPUT"
 
 echo -e "${YELLOW}Telegram Bot Token（可选）:${NC}"; read -r TELEGRAM_TOKEN
 echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]] && succ "Telegram 启用" || { TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""; log "Telegram 禁用"; }
 
+# 编译 Go 程序
 log "正在编译 Go 扫描器（412 条弱口令）..."
 cat > scamnet.go << 'EOF'
 package main
@@ -89,7 +85,7 @@ type Config struct {
 
 var (
 	cfg          Config
-	validFile    = "socks5_ok.txt"
+	validFile    = "socks5_valid.txt"  // ← 统一
 	seen         = sync.Map{}
 	stats        = make(map[string]int)
 	statsMu      sync.Mutex
@@ -182,7 +178,7 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v7.2 - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v7.3 - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for i := 0; i < total; i += cfg.BatchSize {
@@ -397,7 +393,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.2 - " + time.Now().Format("2025-01-01 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v7.3 - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	for _, l := range sorted {
 		out.WriteString(l + "\n")
 	}
@@ -448,13 +444,15 @@ func parsePorts(s string) []int {
 }
 EOF
 
-go mod init scamnet >/dev/null 2>&1
-go get golang.org/x/sync/semaphore >/dev/null 2>&1
+# 编译
+go mod init scamnet 2>/dev/null || true
+go get golang.org/x/sync/semaphore 2>/dev/null || true
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$GO_BIN" scamnet.go
 succ "Go 扫描器编译完成 → $GO_BIN"
 
-# 守护进程
-cat > "$LOG_DIR/scamnet_otc.sh" << EOF
+# 守护进程（统一使用 scamnet_guard.sh）
+GUARD_SCRIPT="$LOG_DIR/scamnet_guard.sh"
+cat > "$GUARD_SCRIPT" << EOF
 #!/bin/bash
 while :; do
     echo "[GUARD] \$(date) - 启动扫描..."
@@ -473,11 +471,11 @@ while :; do
     sleep 3
 done
 EOF
-chmod +x "$LOG_DIR/scamnet_otc.sh"
+chmod +x "$GUARD_SCRIPT"
 
-pkill -f "scamnet_otc.sh" 2>/dev/null || true
-nohup bash "$LOG_DIR/scamnet_otc.sh" > /dev/null 2>&1 &
+pkill -f "scamnet_guard.sh" 2>/dev/null || true
+nohup bash "$GUARD_SCRIPT" > /dev/null 2>&1 &
 succ "守护进程启动！PID: $!"
 log "日志: tail -f $LATEST_LOG"
-log "停止: pkill -f scamnet_otc.sh"
-log "结果: socks5_ok.txt"
+log "停止: pkill -f scamnet_guard.sh"
+log "结果: $VALID_FILE"
