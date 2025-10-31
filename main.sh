@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v4.5（终极无敌：强制系统安装 + PATH 永久修复）
+# main.sh - Scamnet OTC v4.1（终极无敌：YAML 强制换行 + 变量安全注入 + aiohttp 强制安装）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -8,26 +8,19 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
 
-echo -e "${GREEN}[OTC] Scamnet v4.5 (终极无敌 + 强制系统安装)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v4.1 (终极无敌 + YAML 强制换行)${NC}"
 echo "日志 → $LATEST_LOG"
 
 # ==================== 强制依赖安装（系统级）===================
 install_deps_force() {
     echo -e "${YELLOW}[*] 强制安装依赖（系统级）...${NC}"
-
-    # 1. 确保 python3 和 pip3 存在
     apt update -qq && apt install -y python3 python3-pip python3-venv || yum install -y python3 python3-pip || apk add python3 py3-pip || true
-
-    # 2. 使用 python3 -m pip 强制系统安装
     python3 -m pip install --break-system-packages aiohttp tqdm pyyaml --force-reinstall --no-cache-dir || \
     python3 -m pip install aiohttp tqdm pyyaml --force-reinstall --no-cache-dir
-
-    # 3. 验证安装
     if ! python3 -c "import aiohttp" &>/dev/null; then
         echo -e "${RED}[!] aiohttp 安装失败！${NC}"
         exit 1
     fi
-
     touch .deps_installed
     echo -e "${GREEN}[+] 依赖强制安装完成${NC}"
 }
@@ -35,9 +28,8 @@ install_deps_force() {
 if [ ! -f ".deps_installed" ]; then
     install_deps_force
 else
-    # 即使已安装，也强制验证一次
     if ! python3 -c "import aiohttp" &>/dev/null; then
-        echo -e "${YELLOW}[*] 检测到模块缺失，重新强制安装...${NC}"
+        echo -e "${YELLOW}[*] 模块缺失，重新安装...${NC}"
         install_deps_force
     else
         echo -e "${GREEN}[+] 依赖已验证${NC}"
@@ -79,19 +71,22 @@ else
 fi
 echo -e "${GREEN}[*] 端口配置: $PORT_INPUT → $PORTS_CONFIG${NC}"
 
+# ==================== 安全转义函数 ====================
+escape_yaml() {
+    python3 -c 'import sys, json; sys.stdout.write(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '""'
+}
+
 # ==================== 生成后台脚本 ====================
 cat > "$RUN_SCRIPT" << 'EOF'
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# === 强制写入 config.yaml（每行独立）===
-cat > config.yaml << CONFIG
-input_range: "${START_IP}-${END_IP}"
-$PORTS_CONFIG
-timeout: 5.0
-max_concurrent: 5000
-CONFIG
+# === 终极安全写入 config.yaml（强制换行）===
+printf 'input_range: "%s-%s"\n' "$START_IP" "$END_IP" > config.yaml
+printf '%s\n' "$PORTS_CONFIG" >> config.yaml
+printf 'timeout: 5.0\n' >> config.yaml
+printf 'max_concurrent: 5000\n' >> config.yaml
 
 # === scanner_async.py ===
 cat > scanner_async.py << 'PY'
@@ -260,7 +255,7 @@ async def scan(ip, port, session):
                 f.write(line + "\n")
 
 async def main():
-    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.5\n")
+    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.6\n")
     with open("socks5_valid.txt", "w") as f: f.write("# socks5://...\n")
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT, limit_per_host=10, ssl=False, force_close=True, enable_cleanup_closed=True)
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
@@ -279,20 +274,18 @@ PY
 chmod +x scanner_async.py
 > result_detail.txt
 > socks5_valid.txt
-
-# === 强制使用 python3 -m pip 运行 ===
 echo "[OTC] 扫描启动..."
 python3 scanner_async.py
 EOF
 
-# ==================== 安全注入变量 ====================
-START_IP_ESC=$(printf '%s' "$START_IP" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '""')
-END_IP_ESC=$(printf '%s' "$END_IP" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '""')
-PORTS_CONFIG_ESC=$(printf '%s' "$PORTS_CONFIG" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '""')
+# ==================== 变量注入（使用转义后的值）===================
+START_IP_ESC=$(printf '%s' "$START_IP" | escape_yaml)
+END_IP_ESC=$(printf '%s' "$END_IP" | escape_yaml)
+PORTS_CONFIG_ESC=$(printf '%s' "$PORTS_CONFIG" | escape_yaml)
 
 sed -i \
-    -e "s|\${START_IP}|$START_IP_ESC|g" \
-    -e "s|\${END_IP}|$END_IP_ESC|g" \
+    -e "s|\$START_IP|$START_IP_ESC|g" \
+    -e "s|\$END_IP|$END_IP_ESC|g" \
     -e "s|\$PORTS_CONFIG|$PORTS_CONFIG_ESC|g" \
     "$RUN_SCRIPT"
 
