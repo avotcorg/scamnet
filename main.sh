@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v4.1（终极无敌：不注入变量 + 直接展开 + YAML 100% 安全）
+# main.sh - Scamnet OTC v4.1（生产稳定版：防 OOM + 低内存 + 自动重启）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -8,7 +8,7 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
 
-echo -e "${GREEN}[OTC] Scamnet v4.1 (终极无敌 + 直接展开)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v4.1 (生产稳定 + 防 OOM + 自动重启)${NC}"
 echo "日志 → $LATEST_LOG"
 
 # ==================== 强制依赖安装 ====================
@@ -71,28 +71,29 @@ else
 fi
 echo -e "${GREEN}[*] 端口配置: $PORT_INPUT → $PORTS_CONFIG${NC}"
 
-# ==================== 生成后台脚本（直接展开变量）===================
+# ==================== 生成后台脚本（防 OOM）===================
 cat > "$RUN_SCRIPT" << EOF
 #!/bin/bash
 set -euo pipefail
 cd "\$(dirname "\$0")"
 
-# === 直接写入 config.yaml（变量已展开）===
+# === 写入 config.yaml ===
 cat > config.yaml << CONFIG
 input_range: "$START_IP-$END_IP"
 $PORTS_CONFIG
 timeout: 5.0
-max_concurrent: 5000
+max_concurrent: 500
+batch_size: 1000
 CONFIG
 
-# === scanner_async.py（保持不变）===
+# === scanner_async.py（低内存 + 分批）===
 cat > scanner_async.py << 'PY'
 #!/usr/bin/env python3
 import asyncio
 import aiohttp
 import ipaddress
 import yaml
-from tqdm.asyncio import tqdm_asyncio
+from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -101,7 +102,8 @@ with open('config.yaml') as f:
 INPUT_RANGE = cfg['input_range']
 RAW_PORTS = cfg.get('ports', cfg.get('range'))
 TIMEOUT = cfg.get('timeout', 5.0)
-MAX_CONCURRENT = cfg.get('max_concurrent', 5000)
+MAX_CONCURRENT = cfg.get('max_concurrent', 500)
+BATCH_SIZE = cfg.get('batch_size', 1000)
 
 def parse_ip_range(s):
     start, end = s.split('-')
@@ -119,10 +121,8 @@ ports = parse_ports(RAW_PORTS)
 print(f"[*] IP: {len(ips):,}, 端口: {len(ports)}, 总任务: {len(ips)*len(ports):,}")
 
 valid_count = 0
-detail_lock = asyncio.Lock()
-valid_lock = asyncio.Lock()
-country_cache = {}
 semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+country_cache = {}
 
 WEAK_PAIRS = list(set([
 # === 原始列表 ===
@@ -241,24 +241,23 @@ async def scan(ip, port, session):
             global valid_count
             valid_count += 1
             fmt = f"socks5://{auth_str}@{ip}:{port}#{country}".replace("@:", ":")
-            async with valid_lock:
-                with open("socks5_valid.txt", "a", encoding="utf-8") as f:
-                    f.write(fmt + "\n")
+            with open("socks5_valid.txt", "a", encoding="utf-8") as f:
+                f.write(fmt + "\n")
             print(f"[+] 发现 #{valid_count}: {fmt}")
-        status = "OK (Weak)" if auth_pair else ("OK" if ok else "FAIL")
-        line = f"{ip}:{port} | {status} | {country} | {lat}ms | {exp} | {auth_str}"
-        async with detail_lock:
-            with open("result_detail.txt", "a", encoding="utf-8") as f:
-                f.write(line + "\n")
 
 async def main():
-    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.7\n")
+    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.8\n")
     with open("socks5_valid.txt", "w") as f: f.write("# socks5://...\n")
-    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT, limit_per_host=10, ssl=False, force_close=True, enable_cleanup_closed=True)
+    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT, limit_per_host=10, ssl=False, force_close=True)
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
-        tasks = [scan(ip, port, session) for ip in ips for port in ports]
-        for f in tqdm_asyncio.as_completed(tasks, total=len(tasks), desc="扫描", unit="conn", ncols=100):
-            await f
+        tasks = [(ip, port) for ip in ips for port in ports]
+        pbar = tqdm(total=len(tasks), desc="扫描", unit="conn", ncols=100)
+        for i in range(0, len(tasks), BATCH_SIZE):
+            batch = tasks[i:i+BATCH_SIZE]
+            batch_tasks = [scan(ip, port, session) for ip, port in batch]
+            await asyncio.gather(*batch_tasks)
+            pbar.update(len(batch))
+        pbar.close()
     print(f"\n[+] 完成！发现 {valid_count} 个 → socks5_valid.txt")
 
 if __name__ == "__main__":
@@ -277,9 +276,9 @@ EOF
 
 chmod +x "$RUN_SCRIPT"
 
-# ==================== 启动后台 ====================
-echo -e "${GREEN}[*] 启动后台扫描...${NC}"
+# ==================== 启动后台（自动重启）===================
+echo -e "${GREEN}[*] 启动后台扫描（防 OOM + 自动重启）...${NC}"
 echo " 查看进度: tail -f $LATEST_LOG"
 echo " 停止扫描: pkill -f scanner_async.py"
-nohup "$RUN_SCRIPT" > "$LATEST_LOG" 2>&1 &
+nohup bash -c "while true; do $RUN_SCRIPT; echo '[!] 进程崩溃，3秒后重启...' ; sleep 3; done" > "$LATEST_LOG" 2>&1 &
 echo -e "${GREEN}[+] 已启动！PID: $!${NC}"
