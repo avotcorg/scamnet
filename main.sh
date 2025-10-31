@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v1.5（内存优化 + 边扫边生 + 412 弱口令）
+# main.sh - Scamnet OTC v1.2（纯 Go + 412 弱口令 + 内存优化 + 类型安全）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -32,7 +32,7 @@ if [ "$(printf '%s\n' "$START_IP" "$END_IP" | sort -V | head -n1)" != "$START_IP
 fi
 succ "范围: $START_IP - $END_IP"
 
-echo -e "${YELLOW}端口（默认: 1080）:${NC}"
+echo -e "${YELLOW}端口（默认: 1080，支持 1080,8080 或 1000-2000）:${NC}"
 read -r PORT_INPUT; PORT_INPUT=${PORT_INPUT:-1080}
 PORTS=$(echo "$PORT_INPUT" | tr ',' ' ')
 succ "端口: $PORT_INPUT"
@@ -41,7 +41,7 @@ echo -e "${YELLOW}Telegram Bot Token（可选）:${NC}"; read -r TELEGRAM_TOKEN
 echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]] && succ "Telegram 启用" || { TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""; log "Telegram 禁用"; }
 
-log "正在编译 Go 扫描器（412 条弱口令 + 内存优化）..."
+log "正在编译 Go 扫描器（412 条弱口令 + 内存优化 + 类型安全）..."
 cat > scamnet.go << 'EOF'
 package main
 
@@ -91,6 +91,7 @@ type IPInfo struct {
 	Origin string `json:"origin"`
 }
 
+// === 412 条弱口令字典（已去重）===
 var weakPairs = [][2]string{
 	{"", ""}, {"0", "0"}, {"00", "00"}, {"000", "000"}, {"0000", "0000"}, {"00000", "00000"}, {"000000", "000000"},
 	{"1", "1"}, {"11", "11"}, {"111", "111"}, {"1111", "1111"}, {"11111", "11111"}, {"111111", "111111"},
@@ -167,21 +168,22 @@ func main() {
 	start := ipToInt(cfg.StartIP)
 	end := ipToInt(cfg.EndIP)
 	ports := parsePorts(cfg.Ports)
-	total := (end - start + 1) * uint32(len(ports))
+
+	total := uint64(end-start+1) * uint64(len(ports))
 	batchCount := (total + uint64(cfg.BatchSize) - 1) / uint64(cfg.BatchSize)
 
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v1.5 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.2 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
 	f.Close()
 
-	// 边生成边扫描
 	for batchStart := uint64(0); batchStart < total; batchStart += uint64(cfg.BatchSize) {
 		batchEnd := batchStart + uint64(cfg.BatchSize)
 		if batchEnd > total {
 			batchEnd = total
 		}
+		fmt.Printf("[*] 批次 %d → %d (%d tasks)\n", batchStart/uint64(cfg.BatchSize)+1, batchEnd, batchEnd-batchStart)
 		scanBatchByIndex(start, end, ports, batchStart, batchEnd)
 	}
 
@@ -380,7 +382,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.5 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.2 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
 	for _, l := range sorted {
 		out.WriteString(l + "\n")
 	}
