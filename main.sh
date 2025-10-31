@@ -173,7 +173,7 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v1.5 - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.5 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
 	f.Close()
 
 	// 边生成边扫描
@@ -380,7 +380,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.5 - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.5 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
 	for _, l := range sorted {
 		out.WriteString(l + "\n")
 	}
