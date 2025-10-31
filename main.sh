@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v4.0（永不崩溃：独立事件循环 + 零共享 + 生产稳定）
+# main.sh - Scamnet OTC v4.1（终极版：变量独立 + 无依赖 + 永不崩溃）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -8,7 +8,7 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
 
-echo -e "${GREEN}[OTC] Scamnet v4.0 (永不崩溃 + 独立事件循环)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v5.1 (终极独立版 + 永不崩溃)${NC}"
 echo "日志 → $LATEST_LOG"
 
 # ==================== 依赖安装 ====================
@@ -51,29 +51,34 @@ PORTS_CONFIG=""
 if [[ $PORT_INPUT =~ ^[0-9]+-[0-9]+$ ]]; then
     PORTS_CONFIG="range: \"$PORT_INPUT\""
 elif [[ $PORT_INPUT =~ ^[0-9]+( [0-9]+)*$ ]]; then
-    PORT_LIST=$(echo "$PORT_INPUT" | tr ' ' ',' | sed 's/,/","/g')
+    PORT_LIST=$(echo "$PORT_INPUT" | tr ' ' ',' | sed 's/,/','/g' | sed 's/,/","/g')
     PORTS_CONFIG="ports: [\"$PORT_LIST\"]"
 else
     PORTS_CONFIG="ports: [$PORT_INPUT]"
 fi
 echo -e "${GREEN}[*] 端口: $PORT_INPUT → $PORTS_CONFIG${NC}"
 
-# ==================== 生成扫描器（v5.0 独立运行）===================
-cat > "$RUN_SCRIPT" << 'EOF'
+# ==================== 生成完全独立脚本（v5.1）===================
+cat > "$RUN_SCRIPT" << EOF
 #!/bin/bash
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "\$(dirname "\$0")"
+
+# === 变量重新定义（完全独立）===
+START_IP="$START_IP"
+END_IP="$END_IP"
+PORTS_CONFIG='$PORTS_CONFIG'
 
 # === 写入 config.yaml ===
 cat > config.yaml << CONFIG
-input_range: "$START_IP-$END_IP"
-$PORTS_CONFIG
+input_range: "\$START_IP-\$END_IP"
+\$PORTS_CONFIG
 timeout: 5.0
 max_concurrent: 200
 batch_size: 300
 CONFIG
 
-# === scanner_batch.py（每批独立运行）===
+# === scanner_batch.py（独立运行）===
 cat > scanner_batch.py << 'PY'
 #!/usr/bin/env python3
 import asyncio
@@ -83,25 +88,24 @@ import yaml
 import sys
 from tqdm import tqdm
 
-# 读取批次参数
+# 读取批次
 if len(sys.argv) != 3:
-    print("Usage: scanner_batch.py <start_idx> <end_idx>")
+    print("Usage: scanner_batch.py <start> <end>")
     sys.exit(1)
-START_IDX = int(sys.argv[1])
-END_IDX = int(sys.argv[2])
+start_idx, end_idx = int(sys.argv[1]), int(sys.argv[2])
 
 # 加载配置
 with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
-INPUT_RANGE = cfg['input_range']
-RAW_PORTS = cfg.get('ports', cfg.get('range'))
-TIMEOUT = cfg.get('timeout', 5.0)
-MAX_CONCURRENT = cfg.get('max_concurrent', 200)
+input_range = cfg['input_range']
+raw_ports = cfg.get('ports', cfg.get('range'))
+timeout = cfg.get('timeout', 5.0)
+max_concurrent = cfg.get('max_concurrent', 200)
 
-# 解析 IP 和端口
+# 解析
 def parse_ip_range(s):
-    start, end = s.split('-')
-    return [str(ipaddress.IPv4Address(i)) for i in range(int(ipaddress.IPv4Address(start)), int(ipaddress.IPv4Address(end)) + 1)]
+    a, b = s.split('-')
+    return [str(ipaddress.IPv4Address(i)) for i in range(int(ipaddress.IPv4Address(a)), int(ipaddress.IPv4Address(b)) + 1)]
 
 def parse_ports(p):
     if isinstance(p, str) and '-' in p:
@@ -109,10 +113,10 @@ def parse_ports(p):
         return list(range(a, b + 1))
     return [int(x) for x in p] if isinstance(p, list) else [int(p)]
 
-ips = parse_ip_range(INPUT_RANGE)
-ports = parse_ports(RAW_PORTS)
+ips = parse_ip_range(input_range)
+ports = parse_ports(raw_ports)
 all_tasks = [(ip, port) for ip in ips for port in ports]
-batch_tasks = all_tasks[START_IDX:END_IDX]
+batch = all_tasks[start_idx:end_idx]
 
 WEAK_PAIRS = [# === 原始列表 ===
     ("123","123"),("admin","admin"),("root","root"),("user","user"),("proxy","proxy"),("111","111"),("1","1"),("qwe123","qwe123"),
@@ -195,34 +199,34 @@ async def get_country(ip, session):
 async def test_socks5(ip, port, session, auth=None):
     proxy_auth = aiohttp.BasicAuth(*auth) if auth else None
     try:
-        async with session.get("http://ifconfig.me/", proxy=f"socks5h://{ip}:{port}", proxy_auth=proxy_auth, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as r:
+        async with session.get("http://ifconfig.me/", proxy=f"socks5h://{ip}:{port}", proxy_auth=proxy_auth, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
             return True, round(r.extra.get("time_total", 0) * 1000), (await r.text()).strip()
     except:
         return False, 0, None
 
 async def scan(ip, port):
     connector = aiohttp.TCPConnector(limit=10, ssl=False, force_close=True)
-    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
+    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=timeout)) as session:
         ok, lat, exp = await test_socks5(ip, port, session)
         if not ok:
             for pair in WEAK_PAIRS:
                 ok, lat, exp = await test_socks5(ip, port, session, pair)
                 if ok: break
         if ok:
-            country = await get_country(exp, session) if exp != ip else await get_country(ip, session)
-            auth_str = f"{pair[0]}:{pair[1]}" if ok and 'pair' in locals() and pair[0] else ""
+            country = await get_country(exp, session) if exp and exp != ip else await get_country(ip, session)
+            auth_str = f"{pair[0]}:{pair[1]}" if ok and 'pair' in locals() else ""
             fmt = f"socks5://{auth_str}@{ip}:{port}#{country}".replace("@:", ":")
             with open("socks5_valid.txt", "a", encoding="utf-8") as f:
                 f.write(fmt + "\n")
             print(f"[+] 发现: {fmt}")
 
 async def main():
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    semaphore = asyncio.Semaphore(max_concurrent)
     async def _scan(ip, port):
         async with semaphore:
             await scan(ip, port)
-    tasks = [_scan(ip, port) for ip, port in batch_tasks]
-    for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="扫描", unit="conn"):
+    tasks = [_scan(ip, port) for ip, port in batch]
+    for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="批次", unit="conn"):
         await f
 
 if __name__ == "__main__":
@@ -231,21 +235,38 @@ PY
 
 chmod +x scanner_batch.py
 
-# === 分批运行（每批独立进程）===
-TOTAL_TASKS=$(python3 -c "import yaml; c=yaml.safe_load(open('config.yaml')); ips=len([i for i in range(int(__import__('ipaddress').IPv4Address(c['input_range'].split('-')[0])), int(__import__('ipaddress').IPv4Address(c['input_range'].split('-')[1]))+1)]); ports=len([int(p) for p in c.get('ports', c.get('range', '').split('-'))] if isinstance(c.get('ports'), list) else (lambda r: list(range(int(r.split('-')[0]), int(r.split('-')[1])+1)) if '-' in str(c.get('range','')) else [int(c.get('ports',0))])(c.get('range',''))); print(ips*ports)")
-BATCH_SIZE=$(yq e '.batch_size' config.yaml 2>/dev/null || echo 300)
-echo "[*] 总任务: $TOTAL_TASKS, 分批大小: $BATCH_SIZE"
+# === 计算总任务数 ===
+TOTAL=\$(
+  python3 -c "
+import yaml, ipaddress
+c = yaml.safe_load(open('config.yaml'))
+s, e = map(ipaddress.IPv4Address, c['input_range'].split('-'))
+ips = e - s + 1
+p = c.get('ports', c.get('range'))
+if isinstance(p, str) and '-' in p:
+    a, b = map(int, p.split('-'))
+    ports = b - a + 1
+elif isinstance(p, list):
+    ports = len(p)
+else:
+    ports = 1
+print(int(ips) * ports)
+  "
+)
+BATCH_SIZE=\$(yq e '.batch_size' config.yaml 2>/dev/null || echo 300)
+
+echo "[*] 总任务: \$TOTAL, 分批: \$BATCH_SIZE"
 
 > socks5_valid.txt
 > result_detail.txt
-echo "# Scamnet v5.0" > result_detail.txt
+echo "# Scamnet v5.1" > result_detail.txt
 echo "# socks5://..." > socks5_valid.txt
 
-for ((i=0; i<TOTAL_TASKS; i+=BATCH_SIZE)); do
-    end=$((i + BATCH_SIZE))
-    [ $end -gt $TOTAL_TASKS ] && end=$TOTAL_TASKS
-    echo "[*] 扫描批次: $i-$end"
-    python3 scanner_batch.py $i $end
+for ((i=0; i<TOTAL; i+=BATCH_SIZE)); do
+    end=\$((i + BATCH_SIZE))
+    [ \$end -gt \$TOTAL ] && end=\$TOTAL
+    echo "[*] 扫描批次 \$i - \$end"
+    python3 scanner_batch.py \$i \$end
 done
 
 echo "[+] 扫描完成！结果 → socks5_valid.txt"
@@ -253,8 +274,8 @@ EOF
 
 chmod +x "$RUN_SCRIPT"
 
-# ==================== 启动（自动重启）===================
-echo -e "${GREEN}[*] 启动后台扫描（永不崩溃）...${NC}"
+# ==================== 启动后台 ====================
+echo -e "${GREEN}[*] 启动后台扫描...${NC}"
 echo " 查看进度: tail -f $LATEST_LOG"
 echo " 停止扫描: pkill -f scanner_batch.py"
 nohup bash -c "while true; do echo '[OTC] 扫描启动...'; $RUN_SCRIPT; echo '[!] 重启中...'; sleep 3; done" > "$LATEST_LOG" 2>&1 &
