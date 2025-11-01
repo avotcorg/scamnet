@@ -17,8 +17,8 @@ if ! command -v go >/dev/null 2>&1; then
     exit 1
 fi
 
-DEFAULT_START="47.80.0.0"
-DEFAULT_END="47.86.255.255"
+DEFAULT_START="47.76.215.0"
+DEFAULT_END="47.76.215.255"
 read_ip() { echo -e "${YELLOW}$1（默认: $2）:${NC}"; read -r input; eval "$3=\"\${input:-$2}\""; }
 read_ip "起始 IP" "$DEFAULT_START" START_IP
 read_ip "结束 IP" "$DEFAULT_END" END_IP
