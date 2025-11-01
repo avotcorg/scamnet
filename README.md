@@ -7,10 +7,10 @@ bash <(curl -Ls https://raw.githubusercontent.com/avotcorg/scamnet/main/main.sh)
 bash <(curl -Ls https://raw.githubusercontent.com/avotcorg/scamnet/main/allmain.sh )
 ```
 ### 功能简介
-├── 生成弱口令字典
-├── 编译 Go 扫描器（scamnet.go）
-├── 启动守护进程（scamnet_guard.sh）
-└── 实时输出 + Telegram 推送
+生成弱口令字典
+编译 Go 扫描器（scamnet.go）
+启动守护进程（scamnet_guard.sh）
+实时输出 + Telegram 推送
 ### 全部功能
 核心功能详解
 功能说明1. 交互式配置启动时输入 IP 范围、端口、Telegram
