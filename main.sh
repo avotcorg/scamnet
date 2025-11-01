@@ -39,7 +39,7 @@ echo -e "${YELLOW}Telegram Bot Token（可选）:${NC}"; read -r TELEGRAM_TOKEN
 echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]] && succ "Telegram 启用" || { TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""; log "Telegram 禁用"; }
 
-log "正在编译 Go 扫描器（OTC 优化版）..."
+log "正在编译 Go 扫描器（OTC 优化版 TG:soqunla）..."
 
 # ============ 完全修复的 Go 源码（Scamnet Go v1.3 OTC TG:soqunla ） ============
 cat > scamnet.go << 'EOF'
@@ -173,7 +173,7 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for batchStart := uint64(0); batchStart < total; batchStart += uint64(cfg.BatchSize) {
@@ -349,7 +349,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
 	for _, l := range sorted {
 		out.WriteString(l + "\n")
 	}
@@ -357,7 +357,7 @@ func dedupAndReport() {
 	os.Rename(validFile+".tmp", validFile)
 
 	count := len(sorted)
-	fmt.Printf("[+] 扫描完成 → %s (%d 条)\n", validFile, count)
+	fmt.Printf("[+] 扫描完成 TG:soqunla → %s (%d 条)\n", validFile, count)
 	if cfg.TelegramToken != "" {
 		sendTelegram(fmt.Sprintf("Scan completed! Total <b>%d</b> valid proxies", count))
 	}
@@ -399,7 +399,7 @@ EOF
 go mod init scamnet 2>/dev/null || true
 go get golang.org/x/sync/semaphore 2>/dev/null || true
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$GO_BIN" scamnet.go
-succ "Go 扫描器编译完成 → $GO_BIN"
+succ "Go 扫描器编译完成 TG:soqunla → $GO_BIN"
 
 # ============ 最终守卫脚本：日志轮转 + 仅记录成功 ============
 GUARD_SCRIPT="$LOG_DIR/scamnet_guard.sh"
@@ -410,7 +410,7 @@ MAX_LINES=500
 
 # 清空旧日志
 > "$LOG"
-echo "[GUARD] $(date) - Scamnet OTC 启动" | tee -a "$LOG"
+echo "[GUARD] $(date) - Scamnet OTC TG:soqunla 启动" | tee -a "$LOG"
 echo "[GUARD] 范围: $START_IP ~ $END_IP | 端口: $PORTS" | tee -a "$LOG"
 
 while :; do
@@ -440,7 +440,7 @@ chmod +x "$GUARD_SCRIPT"
 pkill -f "scamnet_guard.sh" 2>/dev/null || true
 sleep 1
 nohup bash "$GUARD_SCRIPT" > /dev/null 2>&1 &
-succ "守护进程已启动！PID: $!"
+succ "守护进程已启动 TG:soqunla！PID: $!"
 log "日志: tail -f $LATEST_LOG  (仅 500 行)"
 log "停止: pkill -f scamnet_guard.sh"
 log "结果: cat $VALID_FILE"
