@@ -437,7 +437,7 @@ chmod +x "$GUARD_SCRIPT"
 pkill -f "scamnet_guard.sh" 2>/dev/null || true
 sleep 1
 nohup bash "$GUARD_SCRIPT" > /dev/null 2>&1 &
-succ "守护进程已启动 TG:soqunla！PID: $!"
+succ "守护进程已启动 ！PID: $!"
 log "日志: tail -f $LATEST_LOG (仅 500 行)"
 log "停止: pkill -f scamnet_guard.sh"
 log "结果: cat $VALID_FILE"
