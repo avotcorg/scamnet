@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet Go v1.6 OTC TG:soqunla （兼容所有 Go 版本 · 终极稳定版）
+# main.sh - Scamnet Go v1.7 OTC TG:soqunla （万能兼容版 · 支持 Go 1.12+）
 set -euo pipefail
 IFS=$'\n\t'
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
@@ -366,9 +366,9 @@ zzzzz:zzzzz
 zzzzzz:zzzzzz
 EOF
 
-log "正在编译 Go 扫描器（v1.6 兼容所有 Go 版本 TG:soqunla）..."
+log "正在编译 Go 扫描器（v1.7 万能兼容版 TG:soqunla）..."
 
-# ============ Go 源码（已修复 ioutil.ReadFile） ============
+# ============ Go 源码（使用 ioutil.ReadFile 兼容所有版本） ============
 cat > scamnet.go << 'EOF'
 package main
 
@@ -419,7 +419,7 @@ type IPInfo struct {
 }
 
 func loadWeakPairs() {
-	data, err := ioutil.ReadFile(weakFile)
+	data, err := ioutil.ReadFile(weakFile)  // 兼容 Go 1.12+
 	if err != nil { return }
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
@@ -463,7 +463,7 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d | 弱口令: %d 条\n", total, cfg.BatchSize, batchCount, len(weakPairs))
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v1.6 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.7 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for batchStart := uint64(0); batchStart < total; batchStart += uint64(cfg.BatchSize) {
@@ -629,7 +629,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.6 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.7 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	for _, l := range sorted { out.WriteString(l + "\n") }
 	out.Close()
 	os.Rename(validFile+".tmp", validFile)
@@ -691,7 +691,7 @@ TELEGRAM_TOKEN="$TELEGRAM_TOKEN"
 TELEGRAM_CHATID="$TELEGRAM_CHATID"
 
 > "\$LOG"
-echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - Scamnet v1.6 启动" | tee -a "\$LOG"
+echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - Scamnet v1.7 启动" | tee -a "\$LOG"
 echo "[GUARD] 范围: \$START_IP ~ \$END_IP | 端口: \$PORTS" | tee -a "\$LOG"
 
 while :; do
