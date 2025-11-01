@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v1.3（日志极致优化 + 自动轮转）
+# main.sh - Scamnet OTC v1.3 Scamnet Go v1.3 OTC TG:soqunla （日志极致优化 + 自动轮转）
 set -euo pipefail
 IFS=$'\n\t'
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
@@ -39,9 +39,9 @@ echo -e "${YELLOW}Telegram Bot Token（可选）:${NC}"; read -r TELEGRAM_TOKEN
 echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]] && succ "Telegram 启用" || { TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""; log "Telegram 禁用"; }
 
-log "正在编译 Go 扫描器（FINAL 优化版）..."
+log "正在编译 Go 扫描器（OTC 优化版）..."
 
-# ============ 完全修复的 Go 源码（无 atomic、无进度条） ============
+# ============ 完全修复的 Go 源码（Scamnet Go v1.3 OTC TG:soqunla ） ============
 cat > scamnet.go << 'EOF'
 package main
 
@@ -173,7 +173,7 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v1.3 FINAL - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for batchStart := uint64(0); batchStart < total; batchStart += uint64(cfg.BatchSize) {
@@ -349,7 +349,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.3 FINAL - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.3 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	for _, l := range sorted {
 		out.WriteString(l + "\n")
 	}
@@ -410,7 +410,7 @@ MAX_LINES=500
 
 # 清空旧日志
 > "$LOG"
-echo "[GUARD] $(date) - Scamnet FINAL 启动" | tee -a "$LOG"
+echo "[GUARD] $(date) - Scamnet OTC 启动" | tee -a "$LOG"
 echo "[GUARD] 范围: $START_IP ~ $END_IP | 端口: $PORTS" | tee -a "$LOG"
 
 while :; do
@@ -445,4 +445,3 @@ log "日志: tail -f $LATEST_LOG  (仅 500 行)"
 log "停止: pkill -f scamnet_guard.sh"
 log "结果: cat $VALID_FILE"
 log "空间释放: > $LATEST_LOG"
-EOF
