@@ -1,5 +1,5 @@
 #!/bin/bash
-# scamnet 纯 Bash + nc 完美版
+# scamnet 纯 Bash + 默认自动后台运行
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -25,6 +25,17 @@ echo "0" > "$DONE_FILE"
 echo "# SOCKS5 Connected" > "$CONNECTED_FILE"
 echo "# Generated: $(date)" >> "$CONNECTED_FILE"
 echo "# Success Only" > "$SUCCESS_LOG"
+
+# 自动后台运行 (除非参数为 foreground)
+if [[ "${1:-}" != "foreground" ]]; then
+  if [[ -t 0 ]]; then  # 是终端
+    echo "[*] 自动后台运行中... (日志: tail -f $SUCCESS_LOG)"
+    echo "[*] 取消进程: pkill -f $(basename $0)"
+    nohup "$0" foreground > /dev/null 2>&1 &
+    echo "[*] PID: $! (已记录到 $PID_FILE)"
+    exit 0
+  fi
+fi
 
 echo $$ > "$PID_FILE"
 
@@ -128,7 +139,6 @@ test_proxy() {
   increment_done
 }
 
-# 进度监控后台进程
 monitor_progress() {
   while :; do
     {
@@ -140,7 +150,7 @@ monitor_progress() {
       print_progress "$TOTAL"
       break
     fi
-    sleep 5  # 每5秒检查一次
+    sleep 5
   done
 }
 
@@ -170,7 +180,8 @@ succ "扫描完成！连通: $(grep -v '^#' "$CONNECTED_FILE" | wc -l) 条"
 log "结果: cat $CONNECTED_FILE"
 log "实时成功: tail -f $SUCCESS_LOG"
 echo "========================================"
-echo "后台运行: nohup $(basename $0) &"
+echo "默认后台运行: ./$(basename $0)"
+echo "前台运行: ./$(basename $0) foreground"
 echo "取消进程: pkill -f $(basename $0)"
 echo "清理: rm -rf $CONNECTED_FILE $LOG_DIR $(basename $0)"
 echo "========================================"
