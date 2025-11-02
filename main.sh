@@ -1,9 +1,5 @@
 #!/bin/bash
-# scamnet 纯 Bash + nc 超级版
-# 日志: 只成功
-# 后台: nohup ./main.sh &
-# 取消: pkill -f main.sh 或 kill $(cat logs/scamnet.pid)
-# PID 文件准确
+# scamnet 纯 Bash + nc 完美版
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -18,11 +14,15 @@ LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
 SUCCESS_LOG="$LOG_DIR/success.log"
 PID_FILE="$LOG_DIR/scamnet.pid"
-MAX_PROCS=5  # 调整并发
+DONE_FILE="$LOG_DIR/done.count"
+MAX_PROCS=5
 TOTAL=0
+DONE=0
 
 > "$CONNECTED_FILE"
 > "$SUCCESS_LOG"
+> "$DONE_FILE"
+echo "0" > "$DONE_FILE"
 echo "# SOCKS5 Connected" > "$CONNECTED_FILE"
 echo "# Generated: $(date)" >> "$CONNECTED_FILE"
 echo "# Success Only" > "$SUCCESS_LOG"
@@ -32,15 +32,15 @@ echo $$ > "$PID_FILE"
 log() { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
 
 log "扫描器启动 (PID: $$)"
-log "后台: nohup $0 &"
-log "取消: pkill -f $(basename $0) 或 kill $$"
+log "后台运行: nohup $(basename $0) &"
+log "取消进程: pkill -f $(basename $0) 或 kill $$"
 
 read -p "起始 IP (默认 47.80.0.0): " START_IP
 START_IP=${START_IP:-47.80.0.0}
 read -p "结束 IP (默认 47.86.255.255): " END_IP
 END_IP=${END_IP:-47.86.255.255}
-read -p "端口 (默认 1080,8080,8888,5555): " PORTS_STR
-PORTS_STR=${PORTS_STR:-1080,8080,8888,5555}
+read -p "端口 (默认 1080,8080,8888,3128): " PORTS_STR
+PORTS_STR=${PORTS_STR:-1080,8080,8888,3128}
 
 IFS=',' read -ra PORTS <<< "$PORTS_STR"
 expanded=()
@@ -73,24 +73,18 @@ log "范围: $START_IP ~ $END_IP ($IP_COUNT IP)"
 log "端口: ${PORTS[*]} (${#PORTS[@]} 个)"
 log "任务: $TOTAL | 并发: $MAX_PROCS | 超时: 6s"
 
-# 无 null byte 警告的 payload 生成
-gen_payload() {
-  exec 3< <(printf '\x05\x01\x00\x05\x01\x00\x03\x0Cifconfig.me\x00\x50GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n')
-  cat <&3
-  exec 3<&-
-}
-
-PAYLOAD=$(gen_payload)
+# 生成 payload 避免 null byte 警告
+printf -v PAYLOAD '\x05\x01\x00\x05\x01\x00\x03\x0Cifconfig.me\x00\x50GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n'
 
 test_proxy() {
   local ip=$1 port=$2
   local timeout=6
   local start=$(date +%s%N 2>/dev/null || date +%s)
-  local output=$(printf "$PAYLOAD" | nc -w "$timeout" -q 0 "$ip" "$port" 2>/dev/null || true)
+  local output=$(printf -- "$PAYLOAD" | nc -w "$timeout" -q 0 "$ip" "$port" 2>/dev/null || true)
   local end=$(date +%s%N 2>/dev/null || date +%s)
   local lat=$(( (end - start) / 1000000 ))
 
-  [[ $lat -gt 15000 ]] && return
+  [[ $lat -gt 15000 ]] && { echo 1 >> "$DONE_FILE"; return; }
 
   if echo "$output" | grep -qE "HTTP/1\.1 [0-9]+|([0-9]{1,3}\.){3}[0-9]{1,3}"; then
     local origin=$(echo "$output" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1 || echo "unknown")
@@ -103,16 +97,20 @@ test_proxy() {
       } 200<"$CONNECTED_FILE"
     fi
   fi
+  echo 1 >> "$DONE_FILE"
 }
 
 progress() {
-  while jobs -r >/dev/null 2>&1; do
-    running=$(jobs -r | wc -l)
-    done=$((TOTAL - running))
-    r=$(awk "BEGIN{printf \"%.2f\",$done*100/$TOTAL}")
-    filled=$((done * 50 / TOTAL))
-    bar=$(printf "█%.0s" $(seq 1 $filled))$(printf "░%.0s" $(seq 1 $((50-filled))))
+  while :; do
+    local current_done=$(cat "$DONE_FILE" 2>/dev/null || echo 0)
+    local running=$(jobs -r | wc -l)
+    local done=$current_done
+    [[ $done -gt $TOTAL ]] && done=$TOTAL
+    local r=$(awk "BEGIN{printf \"%.2f\",$done*100/$TOTAL}")
+    local filled=$((done * 50 / TOTAL))
+    local bar=$(printf "█%.0s" $(seq 1 $filled))$(printf "░%.0s" $(seq 1 $((50-filled))))
     printf "\r进度: [$bar] $r%% ($done/$TOTAL) 运行:$running   "
+    [[ $done -ge $TOTAL ]] && break
     sleep 0.3
   done
   printf "\r进度: [%50s] 100.00%% ($TOTAL/$TOTAL)          \n" $(printf "█%.0s" {1..50})
@@ -134,13 +132,14 @@ done
 wait
 kill $PROG_PID 2>/dev/null || true
 sort -u "$CONNECTED_FILE" -o "$CONNECTED_FILE"
-rm -f "$PID_FILE"
+rm -f "$PID_FILE" "$DONE_FILE"
 
 succ "完成！连通: $(grep -v '^#' "$CONNECTED_FILE" | wc -l) 条"
 log "成功日志: tail -f $SUCCESS_LOG"
 log "结果: cat $CONNECTED_FILE"
 echo "========================================"
-echo "后台: nohup $0 &"
-echo "取消: pkill -f $(basename $0)"
+echo "后台运行: nohup $(basename $0) &"
+echo "取消进程: pkill -f $(basename $0)"
+echo "实时成功: tail -f $SUCCESS_LOG"
 echo "清理: rm -rf $CONNECTED_FILE $LOG_DIR $(basename $0)"
 echo "========================================"
