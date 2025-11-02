@@ -387,17 +387,7 @@ cat > scamnet.go <<'GOEOF'
 package main
 
 import (
-	"bufio"
-	"context"
-	"encoding/json"
-	"flag"
-	"fmt"
 	"io"
-	"io/ioutil"
-	"net"
-	"net/http"
-	"net/url"
-	"os"
 	"regexp"
 	"sort"
 	"strconv"
