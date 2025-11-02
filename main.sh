@@ -1,5 +1,5 @@
 #!/bin/bash
-# scamnet 纯单文件修复版 - 兼容 Go 1.16（使用 API）
+# scamnet 纯单文件终极修复版 - 兼容 Go 1.16（修复所有错误）
 # 一键运行: chmod +x main.sh && ./main.sh
 
 set -euo pipefail
@@ -15,7 +15,7 @@ mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 CONNECTED_FILE="socks5_connected.txt"
 
-log "写入兼容 Go 1.16 内核到 main.go"
+log "写入 Go 1.16 兼容内核到 main.go"
 cat > main.go << 'EOF'
 package main
 
@@ -113,7 +113,7 @@ func scanBatch(start, end uint32, ports []int, b, e uint64) {
 			wg.Add(1)
 			go func(ip string, port int) {
 				defer wg.Done()
-				sem.Acquire(ctx, 1)
+				if err := sem.Acquire(ctx, 1); err != nil { return }
 				defer sem.Release(1)
 				if test(ip, port) { save(ip, port) }
 				atomic.AddInt64(&done, 1)
@@ -128,11 +128,12 @@ done:
 func test(ip string, port int) bool {
 	proxy := fmt.Sprintf("socks5://%s:%d", ip, port)
 	u, _ := url.Parse(proxy)
-	tr := &http.Transport{Proxy: http.ProxyURL(u),
-		DialContext: (&net.Dialer{Timeout: 4*time.Second}).DialContext,
-		TLSHandshakeTimeout: 4*time.Second,
+	tr := &http.Transport{
+		Proxy: http.ProxyURL(u),
+		DialContext: (&net.Dialer{Timeout: 4 * time.Second}).DialContext,
+		TLSHandshakeTimeout: 4 * time.Second,
 	}
-	client := &http.Client{Transport: tr, Timeout: time.Duration(timeOutSeconds)*time.Second}
+	client := &http.Client{Transport: tr, Timeout: time.Duration(timeOutSeconds) * time.Second}
 	start := time.Now()
 	resp, err := client.Get("http://ifconfig.me")
 	lat := int(time.Since(start).Milliseconds())
@@ -150,7 +151,7 @@ func save(ip string, port int) {
 	muConnected.Lock()
 	defer muConnected.Unlock()
 	f, _ := os.OpenFile(connectedFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
-	defer f.Close()
+	if f != nil { defer f.Close() }
 	line := fmt.Sprintf("socks5://%s:%d", ip, port)
 	fmt.Fprintln(f, line)
 	c := atomic.AddInt64(&connectedCount, 1)
@@ -163,7 +164,7 @@ func progressBar(total uint64) {
 		r := float64(cur)/float64(total)
 		bar := strings.Repeat("█", int(r*50)) + strings.Repeat("░", 50-int(r*50))
 		fmt.Printf("\r进度: [%s] %.1f%% (%d/%d)", bar, r*100, cur, total)
-		time.Sleep(300*time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
 	}
 	fmt.Printf("\r进度: [%s] 100.0%% (%d/%d)\n", strings.Repeat("█", 50), total, total)
 }
@@ -189,29 +190,46 @@ func validIP(s string) bool {
 	ip := net.ParseIP(strings.TrimSpace(s))
 	return ip != nil && ip.To4() != nil 
 }
+
 func ipToInt(ip string) uint32 {
 	p := strings.Split(ip, ".")
+	if len(p) != 4 { return 0 }
 	a, _ := strconv.Atoi(p[0]); b, _ := strconv.Atoi(p[1]); c, _ := strconv.Atoi(p[2]); d, _ := strconv.Atoi(p[3])
 	return uint32(a)<<24 | uint32(b)<<16 | uint32(c)<<8 | uint32(d)
 }
+
 func intToIP(n uint32) string { return fmt.Sprintf("%d.%d.%d.%d", n>>24&255, n>>16&255, n>>8&255, n&255) }
+
 func parsePorts(s string) []int {
 	var res []int; seen := map[int]bool{}
 	for _, t := range strings.Split(s, ",") {
 		t = strings.TrimSpace(t)
 		if strings.Contains(t, "-") {
 			r := strings.Split(t, "-")
-			st, _ := strconv.Atoi(strings.TrimSpace(r[0])); en, _ := strconv.Atoi(strings.TrimSpace(r[1]))
-			for i := st; i <= en && i <= 65535; i++ { if !seen[i] { res = append(res, i); seen[i] = true } }
-		} else if p, err := strconv.Atoi(t); err == Nilsson && p > 0 && p <= 65535 && !seen[p] {
-			res = append(res, p); seen[p] = true
+			if len(r) != 2 { continue }
+			st, err1 := strconv.Atoi(strings.TrimSpace(r[0]))
+			en, err2 := strconv.Atoi(strings.TrimSpace(r[1]))
+			if err1 != nil || err2 != nil || st < 1 || en > 65535 || st > en { continue }
+			for i := st; i <= en; i++ {
+				if !seen[i] {
+					res = append(res, i)
+					seen[i] = true
+				}
+			}
+		} else {
+			p, err := strconv.Atoi(t)
+			if err == nil && p > 0 && p <= 65535 && !seen[p] {
+				res = append(res, p)
+				seen[p] = true
+			}
 		}
 	}
-	sort.Ints(res); return res
+	sort.Ints(res)
+	return res
 }
 EOF
 
-log "创建 go.mod (Go 1.16 兼容)"
+log "创建 go.mod"
 cat > go.mod << 'EOF'
 module scamnet
 
@@ -220,27 +238,28 @@ go 1.16
 require golang.org/x/sync v0.8.0
 EOF
 
-log "下载依赖 (设置代理加速)"
+log "设置 GOPROXY 并下载依赖"
 export GOPROXY=https://goproxy.cn,direct
 go mod tidy
 
-log "编译 (兼容 Go 1.16)"
+log "编译二进制"
 if go build -ldflags="-s -w" -o scamnet main.go; then
 	succ "编译成功！"
 else
-	err "编译失败！升级 Go: apt update && apt install golang-go -y"
+	err "编译失败！请检查 Go 版本 (go version >=1.16)"
+	go version
 	exit 1
 fi
 
 > "$LATEST_LOG"
 
-succ "启动扫描"
-ulimit - -n 999999 || true
+succ "启动扫描（仅连通性）"
+ulimit -n 999999 2>/dev/null || true
 ./scamnet 2>&1 | tee -a "$LATEST_LOG"
 
-succ "完成！"
+succ "扫描完成！"
 echo "========================================"
-echo "连通结果: cat $CONNECTED_FILE"
-echo "实时命中: tail -f $LATEST_LOG | grep --color=always '^\\[+] 通'"
-echo "清理: rm -f main.go go.mod go.sum scamnet $CONNECTED_FILE $LOG_DIR/*"
+echo "连通代理: cat $CONNECTED_FILE"
+echo "实时日志: tail -f $LATEST_LOG | grep --color=always '^\\[+] 通'"
+echo "清理命令: rm -f main.go go.mod go.sum scamnet $CONNECTED_FILE logs/*"
 echo "========================================"
