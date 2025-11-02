@@ -1,10 +1,10 @@
 #!/bin/bash
-# scamnet 纯 Bash + nc 无敌版
+# scamnet 纯 Bash + nc 完美版
 
 set -euo pipefail
 IFS=$'\n\t'
 
-RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
+GREEN='\033[32m'; BLUE='\033[34m'; NC='\033[0m'
 succ() { 
   echo -e "${GREEN}[$(date '+%H:%M:%S')] [+] $*${NC}" | tee -a "$SUCCESS_LOG"
 }
@@ -15,8 +15,9 @@ mkdir -p "$LOG_DIR"
 SUCCESS_LOG="$LOG_DIR/success.log"
 PID_FILE="$LOG_DIR/scamnet.pid"
 DONE_FILE="$LOG_DIR/done.count"
-MAX_PROCS=3
+MAX_PROCS=5
 TOTAL=0
+LAST_PERCENT=-1
 
 > "$CONNECTED_FILE"
 > "$SUCCESS_LOG"
@@ -32,13 +33,14 @@ log() { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
 log "扫描器启动 (PID: $$)"
 log "后台运行: nohup $(basename $0) &"
 log "取消进程: pkill -f $(basename $0) 或 kill $$"
+log "实时成功: tail -f $SUCCESS_LOG"
 
 read -p "起始 IP (默认 47.80.0.0): " START_IP
 START_IP=${START_IP:-47.80.0.0}
 read -p "结束 IP (默认 47.86.255.255): " END_IP
 END_IP=${END_IP:-47.86.255.255}
-read -p "端口 (默认 1080,8080,8888,3128): " PORTS_STR
-PORTS_STR=${PORTS_STR:-1080,8080,8888,3128}
+read -p "端口 (默认 1080,8080,8888,5555): " PORTS_STR
+PORTS_STR=${PORTS_STR:-1080,8080,8888,5555}
 
 IFS=',' read -ra PORTS <<< "$PORTS_STR"
 expanded=()
@@ -72,6 +74,7 @@ TOTAL=$((IP_COUNT * ${#PORTS[@]}))
 log "范围: $START_IP ~ $END_IP ($IP_COUNT IP)"
 log "端口: ${PORTS[*]} (${#PORTS[@]} 个)"
 log "任务: $TOTAL | 并发: $MAX_PROCS | 超时: 6s"
+log "开始扫描 (进度: 0% 10% 20% ... 100%)"
 
 printf -v PAYLOAD '\x05\x01\x00\x05\x01\x00\x03\x0Cifconfig.me\x00\x50GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n'
 
@@ -81,6 +84,16 @@ increment_done() {
     current=$(cat "$DONE_FILE")
     printf "%s\n" "$((current + 1))" > "$DONE_FILE"
   } 200<"$DONE_FILE"
+}
+
+print_progress() {
+  local current_done=$1
+  local percent=$(( current_done * 100 / TOTAL ))
+  local rounded=$(( (percent / 10) * 10 ))
+  if (( rounded > LAST_PERCENT )); then
+    LAST_PERCENT=$rounded
+    echo -e "${BLUE}[$(date '+%H:%M:%S')] 进度: $rounded%${NC}"
+  fi
 }
 
 test_proxy() {
@@ -115,28 +128,23 @@ test_proxy() {
   increment_done
 }
 
-progress() {
-  local current_done=0 running=0 r=0.00 filled=0 bar=""
+# 进度监控后台进程
+monitor_progress() {
   while :; do
     {
       flock 200
       current_done=$(cat "$DONE_FILE" 2>/dev/null || echo 0)
     } 200<"$DONE_FILE"
-    running=$(jobs -r | wc -l)
-    if (( current_done > TOTAL )); then current_done=$TOTAL; fi
-    r=$(awk "BEGIN {printf \"%.2f\", $current_done * 100 / $TOTAL}")
-    filled=$(( current_done * 50 / TOTAL ))
-    bar=""
-    for ((i=1; i<=filled; i++)); do bar+='█'; done
-    for ((i=filled+1; i<=50; i++)); do bar+='░'; done
-    printf "\r进度: [$bar] $r%% ($current_done/$TOTAL) 运行:$running   "
-    if (( current_done >= TOTAL )); then break; fi
-    sleep 0.3
+    print_progress "$current_done"
+    if (( current_done >= TOTAL )); then
+      print_progress "$TOTAL"
+      break
+    fi
+    sleep 5  # 每5秒检查一次
   done
-  printf "\r进度: [%50s] 100.00%% ($TOTAL/$TOTAL)          \n" "$(printf '█%.0s' {1..50})"
 }
 
-progress &
+monitor_progress &
 PROG_PID=$!
 
 i=$START_I
@@ -151,18 +159,18 @@ done
 
 wait
 kill $PROG_PID 2>/dev/null || true
+
 {
   flock 200
   sort -u "$CONNECTED_FILE" -o "$CONNECTED_FILE"
 } 200<"$CONNECTED_FILE"
 rm -f "$PID_FILE" "$DONE_FILE"
 
-succ "完成！连通: $(grep -v '^#' "$CONNECTED_FILE" | wc -l) 条"
-log "成功日志: tail -f $SUCCESS_LOG"
+succ "扫描完成！连通: $(grep -v '^#' "$CONNECTED_FILE" | wc -l) 条"
 log "结果: cat $CONNECTED_FILE"
+log "实时成功: tail -f $SUCCESS_LOG"
 echo "========================================"
 echo "后台运行: nohup $(basename $0) &"
 echo "取消进程: pkill -f $(basename $0)"
-echo "实时成功: tail -f $SUCCESS_LOG"
 echo "清理: rm -rf $CONNECTED_FILE $LOG_DIR $(basename $0)"
 echo "========================================"
