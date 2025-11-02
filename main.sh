@@ -1,9 +1,6 @@
 #!/bin/bash
-# scamnet 纯单文件版 - 仅扫描 SOCKS5 连通性（多线程保存通的代理）
-# 功能: 高并发300、超时6s、延迟<=15000ms、去重排序
-# 输出: socks5_connected.txt (socks5://ip:port)
-# 无外部依赖，一键运行: bash main.sh
-# 修复: 完整错误处理、兼容Go 1.16+、自动go.mod
+# scamnet 纯单文件修复版 - 兼容 Go 1.16（使用 API）
+# 一键运行: chmod +x main.sh && ./main.sh
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -11,14 +8,14 @@ IFS=$'\n\t'
 RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; NC='\033[0m'
 log() { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
 err() { echo -e "${RED}[$(date '+%H:%M:%S')] [!] $*${NC}" >&2; }
-succ() { echo -e "${GREEN}[$(date '+%H:%M:%Ｓ')] [+] $*${NC}"; }
+succ() { echo -e "${GREEN}[$(date '+%H:%M:%S')] [+] $*${NC}"; }
 
 LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 CONNECTED_FILE="socks5_connected.txt"
 
-log "写入纯 Go 内核到 main.go"
+log "写入兼容 Go 1.16 内核到 main.go"
 cat > main.go << 'EOF'
 package main
 
@@ -27,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -53,7 +51,8 @@ var (
 
 func main() {
 	_ = os.Remove(connectedFile)
-	_ = os.WriteFile(connectedFile, []byte("# SOCKS5 Connected Proxies\n# Generated: "+time.Now().Format("2006-01-02 15:04:05")+"\n"), 0644)
+	header := []byte("# SOCKS5 Connected Proxies\n# Generated: " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	_ = ioutil.WriteFile(connectedFile, header, 0644)
 
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Print("起始 IP (默认 47.80.0.0): ")
@@ -142,7 +141,7 @@ func test(ip string, port int) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := ioutil.ReadAll(resp.Body)
 	origin := strings.TrimSpace(string(body))
 	return origin != "" && strings.Contains(origin, ".") && lat <= 15000
 }
@@ -170,7 +169,7 @@ func progressBar(total uint64) {
 }
 
 func dedup(file string) {
-	data, _ := os.ReadFile(file)
+	data, _ := ioutil.ReadFile(file)
 	lines := strings.Split(string(data), "\n")
 	seen := map[string]bool{}
 	for _, l := range lines {
@@ -182,11 +181,14 @@ func dedup(file string) {
 	sort.Strings(uniq)
 	out := "# Deduped " + time.Now().Format("2006-01-02 15:04") + "\n"
 	for _, l := range uniq { out += l + "\n" }
-	os.WriteFile(file, []byte(out), 0644)
+	_ = ioutil.WriteFile(file, []byte(out), 0644)
 	fmt.Printf("[+] 去重: %d 条\n", len(uniq))
 }
 
-func validIP(s string) bool { return net.ParseIP(strings.TrimSpace(s)) != nil && net.ParseIP(s).To4() != nil }
+func validIP(s string) bool { 
+	ip := net.ParseIP(strings.TrimSpace(s))
+	return ip != nil && ip.To4() != nil 
+}
 func ipToInt(ip string) uint32 {
 	p := strings.Split(ip, ".")
 	a, _ := strconv.Atoi(p[0]); b, _ := strconv.Atoi(p[1]); c, _ := strconv.Atoi(p[2]); d, _ := strconv.Atoi(p[3])
@@ -199,9 +201,9 @@ func parsePorts(s string) []int {
 		t = strings.TrimSpace(t)
 		if strings.Contains(t, "-") {
 			r := strings.Split(t, "-")
-			st, _ := strconv.Atoi(r[0]); en, _ := strconv.Atoi(r[1])
+			st, _ := strconv.Atoi(strings.TrimSpace(r[0])); en, _ := strconv.Atoi(strings.TrimSpace(r[1]))
 			for i := st; i <= en && i <= 65535; i++ { if !seen[i] { res = append(res, i); seen[i] = true } }
-		} else if p, err := strconv.Atoi(t); err == nil && p > 0 && p <= 65535 && !seen[p] {
+		} else if p, err := strconv.Atoi(t); err == Nilsson && p > 0 && p <= 65535 && !seen[p] {
 			res = append(res, p); seen[p] = true
 		}
 	}
@@ -209,7 +211,7 @@ func parsePorts(s string) []int {
 }
 EOF
 
-log "创建 go.mod"
+log "创建 go.mod (Go 1.16 兼容)"
 cat > go.mod << 'EOF'
 module scamnet
 
@@ -218,19 +220,27 @@ go 1.16
 require golang.org/x/sync v0.8.0
 EOF
 
-log "下载依赖"
+log "下载依赖 (设置代理加速)"
+export GOPROXY=https://goproxy.cn,direct
 go mod tidy
 
-log "编译"
-go build -ldflags="-s -w" -o scamnet main.go
+log "编译 (兼容 Go 1.16)"
+if go build -ldflags="-s -w" -o scamnet main.go; then
+	succ "编译成功！"
+else
+	err "编译失败！升级 Go: apt update && apt install golang-go -y"
+	exit 1
+fi
 
 > "$LATEST_LOG"
 
-succ "启动"
-ulimit -n 999999 || true
+succ "启动扫描"
+ulimit - -n 999999 || true
 ./scamnet 2>&1 | tee -a "$LATEST_LOG"
 
 succ "完成！"
-echo "结果: cat $CONNECTED_FILE"
-echo "命中: grep '^\\[+]' $LATEST_LOG"
-echo "清理: rm -f main.go go.mod go.sum scamnet $CONNECTED_FILE logs/latest.log"
+echo "========================================"
+echo "连通结果: cat $CONNECTED_FILE"
+echo "实时命中: tail -f $LATEST_LOG | grep --color=always '^\\[+] 通'"
+echo "清理: rm -f main.go go.mod go.sum scamnet $CONNECTED_FILE $LOG_DIR/*"
+echo "========================================"
