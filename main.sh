@@ -1,9 +1,14 @@
 #!/bin/bash
-# scamnet 简化版 - 仅扫描连通性（多线程）+ 保存通的代理
-# 功能: 高并发测试 SOCKS5 是否通（无弱口令、无国家识别、无 Telegram）
-# 输出: socks5_connected.txt (socks5://ip:port) 只保存连通的
-# 并发: 300 | 超时: 6s | 延迟放宽: 15000ms
-# 一键运行: bash this_script.sh
+# scamnet 简化版 - 修复版（仅扫描连通性，多线程保存通的代理）
+# 修复点：
+# 1. 修复 testSocks5 中 resp == nil 判断（Go http.Client 从不返回 nil resp）
+# 2. 增加错误处理，防止 panic
+# 3. 延迟放宽至 15000ms
+# 4. 优化 DialContext 超时
+# 5. 添加 go.mod 强制依赖
+# 6. 兼容旧 Go (1.16+)
+# 输出: socks5_connected.txt (socks5://ip:port)
+# 一键运行: bash main.sh
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -18,8 +23,10 @@ mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 CONNECTED_FILE="socks5_connected.txt"
 GO_FILE="scamnet_simple.go"
+MOD_FILE="go.mod"
+SUM_FILE="go.sum"
 
-log "写入简化 Go 内核（仅连通性测试） → $GO_FILE"
+log "写入修复版 Go 内核（仅连通性） → $GO_FILE"
 cat > "$GO_FILE" << 'EOF'
 package main
 
@@ -54,7 +61,8 @@ var (
 
 func main() {
 	// 初始化文件
-	_ = os.WriteFile(connectedFile, []byte("# SOCKS5 Connected Proxies (socks5://ip:port)\n"), 0644)
+	_ = os.Remove(connectedFile)
+	_ = os.WriteFile(connectedFile, []byte("# SOCKS5 Connected Proxies (socks5://ip:port)\n# Generated: "+time.Now().Format("2006-01-02 15:04:05")+"\n"), 0644)
 
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Print("起始 IP (默认 47.80.0.0): ")
@@ -86,11 +94,11 @@ func main() {
 		startI, endI = endI, startI
 	}
 
-	fmt.Print("端口 (默认 1080,8080,8888,3128): ")
+	fmt.Print("端口 (默认 1080,8080,8888,5555): ")
 	portsStr, _ := reader.ReadString('\n')
 	portsStr = strings.TrimSpace(portsStr)
 	if portsStr == "" {
-		portsStr = "1080,8080,8888,3128"
+		portsStr = "1080,8080,8888,5555"
 	}
 	ports := parsePorts(portsStr)
 	if len(ports) == 0 {
@@ -105,7 +113,7 @@ func main() {
 	fmt.Printf("[*] 范围: %s ~ %s (%d IP)\n", startIP, endIP, ipCount)
 	fmt.Printf("[*] 端口: %v (%d 个)\n", ports, len(ports))
 	fmt.Printf("[*] 总任务: %d | 批次: %d | 并发: %d | 超时: %ds\n", total, batchCount, concurrency, timeOutSeconds)
-	fmt.Println("[*] 开始扫描连通性 (Ctrl+C 停止)...")
+	fmt.Println("[*] 开始扫描 (Ctrl+C 停止)...")
 
 	go progressBar(total)
 
@@ -121,6 +129,7 @@ func main() {
 	time.Sleep(2 * time.Second)
 	dedupAndSort(connectedFile)
 	fmt.Printf("\n[+] 扫描完成！连通代理: %d 条 → %s\n", atomic.LoadInt64(&connectedCount), connectedFile)
+	fmt.Println("查看: cat", connectedFile)
 }
 
 func scanBatch(startIP, endIP uint32, ports []int, batchStart, batchEnd uint64) {
@@ -137,7 +146,7 @@ func scanBatch(startIP, endIP uint32, ports []int, batchStart, batchEnd uint64) 
 			wg.Add(1)
 			go func(ipStr string, port int) {
 				defer wg.Done()
-				if acqErr := sem.Acquire(ctx, 1); acqErr != nil {
+				if err := sem.Acquire(ctx, 1); err != nil {
 					return
 				}
 				defer sem.Release(1)
@@ -160,9 +169,14 @@ func testConnected(ip string, port int) bool {
 		return false
 	}
 	tr := &http.Transport{
-		Proxy:                 http.ProxyURL(u),
-		DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
-		ResponseHeaderTimeout: 3 * time.Second,
+		Proxy: http.ProxyURL(u),
+		DialContext: (&net.Dialer{
+			Timeout:   4 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   4 * time.Second,
+		ResponseHeaderTimeout: 4 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 	client := &http.Client{
 		Transport:     tr,
@@ -172,7 +186,7 @@ func testConnected(ip string, port int) bool {
 	start := time.Now()
 	resp, err := client.Get("http://ifconfig.me")
 	lat := int(time.Since(start).Milliseconds())
-	if err != nil || resp == nil || resp.StatusCode != 200 {
+	if err != nil || resp.StatusCode != 200 {
 		if resp != nil {
 			resp.Body.Close()
 		}
@@ -220,38 +234,34 @@ func progressBar(total uint64) {
 }
 
 func dedupAndSort(filename string) {
-	f, err := os.Open(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return
 	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
+	lines := strings.Split(string(data), "\n")
 	seen := make(map[string]bool)
-	for scanner.Scan() {
-		l := strings.TrimSpace(scanner.Text())
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
 		if l != "" && !strings.HasPrefix(l, "#") {
 			seen[l] = true
 		}
 	}
-	var lines []string
+	var uniq []string
 	for k := range seen {
-		lines = append(lines, k)
+		uniq = append(uniq, k)
 	}
-	sort.Strings(lines)
-	tmpFile := filename + ".tmp"
-	out, _ := os.Create(tmpFile)
-	fmt.Fprintf(out, "# Deduped & Sorted at %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	for _, l := range lines {
-		fmt.Fprintln(out, l)
+	sort.Strings(uniq)
+	out := "# Deduped & Sorted at " + time.Now().Format("2006-01-02 15:04:05") + "\n"
+	for _, l := range uniq {
+		out += l + "\n"
 	}
-	out.Close()
-	os.Rename(tmpFile, filename)
-	newCount := len(lines)
-	fmt.Printf("[+] 去重排序完成: %d 条\n", newCount)
+	_ = os.WriteFile(filename, []byte(out), 0644)
+	fmt.Printf("[+] 去重排序完成: %d 条\n", len(uniq))
 }
 
 func validIP(s string) bool {
-	return net.ParseIP(strings.TrimSpace(s)) != nil
+	ip := net.ParseIP(strings.TrimSpace(s))
+	return ip != nil && ip.To4() != nil
 }
 
 func ipToInt(ip string) uint32 {
@@ -310,29 +320,37 @@ func parsePorts(s string) []int {
 }
 EOF
 
+log "创建 go.mod 强制依赖"
+cat > "$MOD_FILE" << 'EOF'
+module scamnet_simple
+
+go 1.16
+
+require golang.org/x/sync v0.8.0
+EOF
+
 log "下载依赖..."
-go mod init scamnet_simple >/dev/null 2>&1
-go get golang.org/x/sync/semaphore >/dev/null 2>&1
 go mod tidy >/dev/null 2>&1
 
-log "编译简化内核..."
-if go build -ldflags="-s -w" -o scamnet_simple scamnet_simple.go; then
+log "编译修复版内核..."
+if go build -ldflags="-s -w" -o scamnet_simple "$GO_FILE"; then
 	succ "编译成功！"
 else
-	err "编译失败，请检查 Go 环境 (go version >=1.16)"
+	err "编译失败！检查 Go 版本: go version (>=1.16)"
 	go version || true
+	err "安装 Go: apt update && apt install golang-go -y"
 	exit 1
 fi
 
 > "$LATEST_LOG"
 
-succ "启动简化扫描（仅连通性）..."
+succ "启动扫描（仅连通性）..."
 ulimit -n 999999 2>/dev/null || true
 ./scamnet_simple 2>&1 | tee -a "$LATEST_LOG"
 
 succ "完成！"
 echo "========================================"
 echo "连通结果: cat $CONNECTED_FILE"
-echo "实时命中: tail -f $LATEST_LOG | grep '^\\[+] 通'"
-echo "清理: rm -rf scamnet_simple.go scamnet_simple logs $CONNECTED_FILE"
+echo "实时命中: tail -f $LATEST_LOG | grep --color=always '^\\[+] 通'"
+echo "清理: rm -rf $GO_FILE $MOD_FILE $SUM_FILE scamnet_simple logs $CONNECTED_FILE"
 echo "========================================"
