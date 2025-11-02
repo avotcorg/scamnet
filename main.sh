@@ -1,5 +1,5 @@
 #!/bin/bash
-# scamnet 纯 Bash + nc 终极完美版
+# scamnet 纯 Bash + nc 神级版
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -15,7 +15,7 @@ mkdir -p "$LOG_DIR"
 SUCCESS_LOG="$LOG_DIR/success.log"
 PID_FILE="$LOG_DIR/scamnet.pid"
 DONE_FILE="$LOG_DIR/done.count"
-MAX_PROCS=3
+MAX_PROCS=5
 TOTAL=0
 
 > "$CONNECTED_FILE"
@@ -38,8 +38,8 @@ read -p "起始 IP (默认 47.80.0.0): " START_IP
 START_IP=${START_IP:-47.80.0.0}
 read -p "结束 IP (默认 47.86.255.255): " END_IP
 END_IP=${END_IP:-47.86.255.255}
-read -p "端口 (默认 1080,8080,8888,5555): " PORTS_STR
-PORTS_STR=${PORTS_STR:-1080,8080,8888,5555}
+read -p "端口 (默认 1080,8080,8888,3128): " PORTS_STR
+PORTS_STR=${PORTS_STR:-1080,8080,8888,3128}
 
 IFS=',' read -ra PORTS <<< "$PORTS_STR"
 expanded=()
@@ -64,7 +64,7 @@ int2ip() {
 
 START_I=$(ip2int "$START_IP")
 END_I=$(ip2int "$END_IP")
-if [[ $START_I -gt $END_I ]]; then
+if (( START_I > END_I )); then
   t=$START_I; START_I=$END_I; END_I=$t
 fi
 
@@ -77,6 +77,14 @@ log "任务: $TOTAL | 并发: $MAX_PROCS | 超时: 6s"
 # payload 无警告
 printf -v PAYLOAD '\x05\x01\x00\x05\x01\x00\x03\x0Cifconfig.me\x00\x50GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n'
 
+increment_done() {
+  {
+    flock 200
+    awk '{print $1 + 1}' "$DONE_FILE" > "${DONE_FILE}.tmp"
+    mv "${DONE_FILE}.tmp" "$DONE_FILE"
+  } 200<"$DONE_FILE"
+}
+
 test_proxy() {
   local ip=$1 port=$2
   local timeout=6
@@ -88,11 +96,11 @@ test_proxy() {
   if [[ $start_ns == *N ]]; then
     lat=$(( (end_ns - start_ns) / 1000000 ))
   else
-    lat=$((end_ns - start_ns))
+    lat=$((end_ns - start_ns * 1000))
   fi
 
-  if [[ $lat -gt 15000 ]]; then
-    { flock 200; echo 1 >> "$DONE_FILE"; } 200<"$DONE_FILE"
+  if (( lat > 15000 )); then
+    increment_done
     return
   fi
 
@@ -107,7 +115,7 @@ test_proxy() {
       } 200<"$CONNECTED_FILE"
     fi
   fi
-  { flock 200; echo 1 >> "$DONE_FILE"; } 200<"$DONE_FILE"
+  increment_done
 }
 
 progress() {
@@ -119,14 +127,15 @@ progress() {
     } 200<"$DONE_FILE"
     local running=$(jobs -r | wc -l)
     local done=$current_done
-    if [[ $done -gt $TOTAL ]]; then done=$TOTAL; fi
+    if (( done > TOTAL )); then done=$TOTAL; fi
     local r=$(awk "BEGIN{printf \"%.2f\", $done * 100 / $TOTAL}")
     local filled=$(( done * 50 / TOTAL ))
     local bar=""
-    bar=$(printf "█%.0s" $(seq 1 $filled))
-    bar+=$(printf "░%.0s" $(seq 1 $((50 - filled))))
+    local i
+    for ((i=1; i<=filled; i++)); do bar+="█"; done
+    for ((i=filled+1; i<=50; i++)); do bar+="░"; done
     printf "\r进度: [$bar] $r%% ($done/$TOTAL) 运行:$running   "
-    if [[ $done -ge $TOTAL ]]; then break; fi
+    if (( done >= TOTAL )); then break; fi
     sleep 0.3
   done
   printf "\r进度: [%50s] 100.00%% ($TOTAL/$TOTAL)          \n" "$(printf "█%.0s" $(seq 1 50))"
@@ -136,10 +145,10 @@ progress &
 PROG_PID=$!
 
 i=$START_I
-while [[ $i -le $END_I ]]; do
+while (( i <= END_I )); do
   ip=$(int2ip $i)
   for port in "${PORTS[@]}"; do
-    while [[ $(jobs -r | wc -l) -ge $MAX_PROCS ]]; do sleep 0.01; done
+    while (( $(jobs -r | wc -l) >= MAX_PROCS )); do sleep 0.01; done
     test_proxy "$ip" "$port" &
   done
   ((i++))
