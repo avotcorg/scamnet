@@ -1,8 +1,5 @@
 #!/bin/bash
-# scamnet Go 内核版 - 纯 Go 实现 SOCKS5 扫描器
-# 交互输入 IP 范围/端口，支持弱口令爆破、国家查询、进度条、去重
-# 默认端口: 1080,8080,8888,3128（实用，避免全范围爆炸）
-# 使用: bash this_script.sh
+# scamnet Go 内核修复版 - 修复所有编译错误
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -16,7 +13,7 @@ LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 
-log "正在写入 Go 内核代码 → scamnet.go"
+log "正在写入修复版 Go 内核代码 → scamnet.go"
 
 cat > scamnet.go << 'EOF'
 package main
@@ -37,6 +34,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
 	"golang.org/x/sync/semaphore"
 )
 
@@ -45,7 +43,6 @@ var (
 	timeOutSeconds = 6
 	batchSize      = 10000
 	validFile      = "socks5_valid.txt"
-	// detailFile     = "result_detail.txt" // 可选，关闭以加速（FAIL 记录过多）
 	weakPasswords  = []string{
 		"admin:admin", "::", "0:0", "00:00", "000:000", "0000:0000", "00000:00000", "000000:000000",
 		"1:1", "11:11", "111:111", "1111:1111", "11111:11111", "111111:111111",
@@ -101,14 +98,13 @@ var (
 	}
 	countryCache sync.Map
 	muValid     sync.Mutex
-	validCount  atomic.Int64
-	done        atomic.Int64
+	validCount  int64 // 用 atomic.AddInt64/LoadInt64
+	done        int64
 )
 
 func main() {
 	// 初始化文件
-	os.WriteFile(validFile, []byte("# Go SOCKS5 Scanner - valid proxies (socks5://[user:pass@]ip:port#Country)\n"), 0644)
-	// os.WriteFile(detailFile, []byte("# Detail log\n"), 0644) // 关闭 detail 以加速
+	_ = os.WriteFile(validFile, []byte("# Go SOCKS5 Scanner - valid proxies (socks5://[user:pass@]ip:port#Country)\n"), 0644)
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -173,7 +169,7 @@ func main() {
 		scanBatchByIndex(uint32(startI), uint32(endI), ports, bstart, bend)
 	}
 
-	time.Sleep(2 * time.Second) // 等待进度条完成
+	time.Sleep(2 * time.Second)
 	dedupAndReport(validFile)
 	fmt.Printf("\n[+] 扫描完成！最终有效代理: %d 条\n", atomic.LoadInt64(&validCount))
 	fmt.Printf("结果文件: %s\n", validFile)
@@ -209,14 +205,12 @@ batchdone:
 }
 
 func scanTarget(ip string, port int) {
-	// 优先无认证
 	ok, lat, origin := testSocks5(ip, port, "", "")
 	if ok {
 		country := getCountry(origin)
 		saveValid(ip, port, "", "", origin, lat, country)
 		return
 	}
-	// 爆破弱口令
 	for _, pw := range weakPasswords {
 		parts := strings.SplitN(pw, ":", 2)
 		user := strings.TrimSpace(parts[0])
@@ -234,7 +228,6 @@ func scanTarget(ip string, port int) {
 			return
 		}
 	}
-	// FAIL (可选 detail 记录已关闭)
 }
 
 func testSocks5(ip string, portInt int, user, pass string) (bool, int, string) {
@@ -292,12 +285,12 @@ func saveValid(ip string, port int, user, pass, origin string, lat int, country 
 	}
 	line := fmt.Sprintf("socks5://%s%s:%d#%s", auth, ip, port, country)
 	fmt.Fprintln(f, line)
-	count := validCount.Add(1)
+	count := atomic.AddInt64(&validCount, 1)
 	fmt.Printf("[+] #%d %s (%dms) 出站IP:%s 国家:%s\n", count, line, lat, origin, country)
 }
 
 func getCountry(ipStr string) string {
-	if val, exists := countryCache.Load(ipStr); exists {
+	if val, ok := countryCache.Load(ipStr); ok {
 		return val.(string)
 	}
 	var code string
@@ -321,7 +314,7 @@ func getCountry(ipStr string) string {
 			continue
 		}
 		c := strings.TrimSpace(string(bodyBytes))
-		matched, _ := regexp.MustCompile(`^[A-Z]{2}$`).MatchString(c)
+		matched := regexp.MustCompile(`^[A-Z]{2}$`).MatchString(c)
 		if matched {
 			code = c
 			break
@@ -337,7 +330,7 @@ func getCountry(ipStr string) string {
 func progressBar(total uint64) {
 	for {
 		curr := atomic.LoadInt64(&done)
-		if curr >= int64(total) {
+		if uint64(curr) >= total {
 			break
 		}
 		ratio := float64(curr) / float64(total)
@@ -440,26 +433,29 @@ func parsePorts(s string) []int {
 }
 EOF
 
-log "编译 Go 内核（高并发稳定版）..."
-go mod init scamnet >/dev/null 2>/dev/null || true
-go get golang.org/x/sync/semaphore >/dev/null 2>/dev/null || true
-if GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o scamnet scamnet.go; then
-	succ "内核编译成功 → scamnet"
+log "下载依赖..."
+go mod init scamnet >/dev/null 2>&1
+go get golang.org/x/sync/semaphore >/dev/null 2>&1
+
+log "编译修复版内核..."
+if go build -ldflags="-s -w" -o scamnet scamnet.go; then
+	succ "编译成功！"
 else
-	err "编译失败，请检查 Go 环境 (apt install golang-go)"
+	err "编译仍失败，请检查 Go 版本 >=1.18 (go version)"
+	go version
 	exit 1
 fi
 
 > "$LATEST_LOG"
 
-succ "启动扫描内核..."
-echo "[*] 日志实时查看: tail -f $LATEST_LOG" >&2
-echo "[*] 结果文件: socks5_valid.txt" >&2
-echo "[*] Ctrl+C 安全停止" >&2
+succ "启动 Go 内核..."
+echo "[*] 日志: tail -f $LATEST_LOG" >&2
+echo "[*] 结果: cat socks5_valid.txt" >&2
+echo "[*] Ctrl+C 停止" >&2
 
 ulimit -n 65535 >/dev/null 2>&1 || true
 ./scamnet 2>&1 | tee -a "$LATEST_LOG"
 
-succ "扫描完成！检查 socks5_valid.txt"
-echo "tail -f $LATEST_LOG | grep '\\[+]'  # 只看命中"
-echo "cat socks5_valid.txt              # 有效代理"
+succ "完成！"
+echo "grep '\\[+]' $LATEST_LOG   # 只看命中"
+echo "cat socks5_valid.txt       # 代理列表"
