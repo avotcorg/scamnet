@@ -1,5 +1,5 @@
 #!/bin/bash
-# scamnet 纯 Bash + nc 神级版
+# scamnet 纯 Bash + nc 无敌版
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -15,12 +15,11 @@ mkdir -p "$LOG_DIR"
 SUCCESS_LOG="$LOG_DIR/success.log"
 PID_FILE="$LOG_DIR/scamnet.pid"
 DONE_FILE="$LOG_DIR/done.count"
-MAX_PROCS=5
+MAX_PROCS=3
 TOTAL=0
 
 > "$CONNECTED_FILE"
 > "$SUCCESS_LOG"
-> "$DONE_FILE"
 echo "0" > "$DONE_FILE"
 echo "# SOCKS5 Connected" > "$CONNECTED_FILE"
 echo "# Generated: $(date)" >> "$CONNECTED_FILE"
@@ -74,14 +73,13 @@ log "范围: $START_IP ~ $END_IP ($IP_COUNT IP)"
 log "端口: ${PORTS[*]} (${#PORTS[@]} 个)"
 log "任务: $TOTAL | 并发: $MAX_PROCS | 超时: 6s"
 
-# payload 无警告
 printf -v PAYLOAD '\x05\x01\x00\x05\x01\x00\x03\x0Cifconfig.me\x00\x50GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n'
 
 increment_done() {
   {
     flock 200
-    awk '{print $1 + 1}' "$DONE_FILE" > "${DONE_FILE}.tmp"
-    mv "${DONE_FILE}.tmp" "$DONE_FILE"
+    current=$(cat "$DONE_FILE")
+    printf "%s\n" "$((current + 1))" > "$DONE_FILE"
   } 200<"$DONE_FILE"
 }
 
@@ -89,14 +87,13 @@ test_proxy() {
   local ip=$1 port=$2
   local timeout=6
   local start_ns=$(date +%s%N 2>/dev/null || date +%s)
-  local output
-  output=$(printf -- "$PAYLOAD" | nc -w "$timeout" -q 0 "$ip" "$port" 2>/dev/null || true)
+  local output=$(printf -- "$PAYLOAD" | nc -w "$timeout" -q 0 "$ip" "$port" 2>/dev/null || true)
   local end_ns=$(date +%s%N 2>/dev/null || date +%s)
   local lat
   if [[ $start_ns == *N ]]; then
     lat=$(( (end_ns - start_ns) / 1000000 ))
   else
-    lat=$((end_ns - start_ns * 1000))
+    lat=$(( (end_ns - start_ns) * 1000 ))
   fi
 
   if (( lat > 15000 )); then
@@ -110,7 +107,7 @@ test_proxy() {
       {
         flock 200
         echo "socks5://$ip:$port" >> "$CONNECTED_FILE"
-        local num=$(grep -v '^#' "$CONNECTED_FILE" | wc -l)
+        num=$(grep -v '^#' "$CONNECTED_FILE" | wc -l)
         succ "通 #$num socks5://$ip:$port ($lat ms) 出站:$origin"
       } 200<"$CONNECTED_FILE"
     fi
@@ -119,26 +116,24 @@ test_proxy() {
 }
 
 progress() {
-  local current_done=0
+  local current_done=0 running=0 r=0.00 filled=0 bar=""
   while :; do
     {
       flock 200
       current_done=$(cat "$DONE_FILE" 2>/dev/null || echo 0)
     } 200<"$DONE_FILE"
-    local running=$(jobs -r | wc -l)
-    local done=$current_done
-    if (( done > TOTAL )); then done=$TOTAL; fi
-    local r=$(awk "BEGIN{printf \"%.2f\", $done * 100 / $TOTAL}")
-    local filled=$(( done * 50 / TOTAL ))
-    local bar=""
-    local i
-    for ((i=1; i<=filled; i++)); do bar+="█"; done
-    for ((i=filled+1; i<=50; i++)); do bar+="░"; done
-    printf "\r进度: [$bar] $r%% ($done/$TOTAL) 运行:$running   "
-    if (( done >= TOTAL )); then break; fi
+    running=$(jobs -r | wc -l)
+    if (( current_done > TOTAL )); then current_done=$TOTAL; fi
+    r=$(awk "BEGIN {printf \"%.2f\", $current_done * 100 / $TOTAL}")
+    filled=$(( current_done * 50 / TOTAL ))
+    bar=""
+    for ((i=1; i<=filled; i++)); do bar+='█'; done
+    for ((i=filled+1; i<=50; i++)); do bar+='░'; done
+    printf "\r进度: [$bar] $r%% ($current_done/$TOTAL) 运行:$running   "
+    if (( current_done >= TOTAL )); then break; fi
     sleep 0.3
   done
-  printf "\r进度: [%50s] 100.00%% ($TOTAL/$TOTAL)          \n" "$(printf "█%.0s" $(seq 1 50))"
+  printf "\r进度: [%50s] 100.00%% ($TOTAL/$TOTAL)          \n" "$(printf '█%.0s' {1..50})"
 }
 
 progress &
