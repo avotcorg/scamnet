@@ -39,8 +39,8 @@ read -p "起始 IP (默认 47.80.0.0): " START_IP
 START_IP=${START_IP:-47.80.0.0}
 read -p "结束 IP (默认 47.86.255.255): " END_IP
 END_IP=${END_IP:-47.86.255.255}
-read -p "端口 (默认 1080,8080,8888,3128): " PORTS_STR
-PORTS_STR=${PORTS_STR:-1080,8080,8888,3128}
+read -p "端口 (默认 1080,8080,8888,5555): " PORTS_STR
+PORTS_STR=${PORTS_STR:-1080,8080,8888,5555}
 
 IFS=',' read -ra PORTS <<< "$PORTS_STR"
 expanded=()
