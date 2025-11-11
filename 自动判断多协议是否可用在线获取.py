@@ -27,18 +27,21 @@ MAX_WORKERS = 100
 
 # 多个免费代理源（自动轮询）
 PROXY_SOURCES = [
-    "https://www.proxyscan.io/download?type=http",
-    "https://www.proxyscan.io/download?type=https",
-    "https://www.proxyscan.io/download?type=socks4",
-    "https://www.proxyscan.io/download?type=socks5",
+    # Proxifly (GitHub CDN, 更新每 5 分钟，2300+ 代理)
+    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt",
+    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt",
+    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt",
+    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt",
 
-    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
-    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks4",
-    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5",
+    # ProxyScrape (更新每分钟，TXT 格式)
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all",
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks4&timeout=10000&country=all",
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=all",
 
-    "https://openproxy.space/list/http",
-    "https://openproxy.space/list/socks4",
-    "https://openproxy.space/list/socks5",
+    # free-proxy-list.net (更新每 30 分钟，API TXT)
+    "https://www.free-proxy-list.net/",
+    "https://api.proxylist.download/http?limit=500",  # HTTP 代理
+    "https://api.proxylist.download/socks5?limit=500",  # SOCKS5 代理
 ]
 
 USER_AGENTS = [
@@ -183,4 +186,5 @@ def main():
 
 requests.packages.urllib3.disable_warnings()
 if __name__ == "__main__":
+
     main()
